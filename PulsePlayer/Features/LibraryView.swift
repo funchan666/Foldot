@@ -22,6 +22,7 @@ struct LibraryView: View {
     @Binding var importing: Bool
     @Binding var engaged: Bool
     @State private var player: PlayerRoute?
+    @State private var foldPlaybackOwner: String?
     @State private var sharing: SharedFile?
     @State private var removing: PracticeRecording?
     @State private var removingDownload: OfflineVideo?
@@ -151,7 +152,13 @@ struct LibraryView: View {
             .onChange(of: library.listRequest) { _, _ in expandedMovieActionsID = nil }
             .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
             .fullScreenCover(isPresented: $showingExportMembership) { MembershipView(exportRequired: true) }
-            .fullScreenCover(item: $player) { PlayerScreen(route: $0) }
+            .fullScreenCover(item: $player, onDismiss: { foldPlaybackOwner = nil }) { PlayerScreen(route: $0) }
+            .onChange(of: api.offlineOwnerID) { _, owner in
+                if let foldPlaybackOwner, foldPlaybackOwner != owner {
+                    player = nil
+                    self.foldPlaybackOwner = nil
+                }
+            }
             .sheet(item: $folderAction) { action in folderSheet(action) }
             .sheet(item: $removingDownload) { video in
                 ScrollView {
@@ -197,8 +204,13 @@ struct LibraryView: View {
 
     private var libraryNavigation: some View {
         let choices = Group {
-            libraryTab("Marked folds", active: showsFolds) { filter = Self.foldCollection }
-            libraryTab("Video files", active: !showsFolds) { filter = lastFileCollection.rawValue }
+            libraryTab("Marked folds", active: showsFolds) {
+                if !showsFolds { lastFileCollection = category }
+                filter = Self.foldCollection
+            }
+            libraryTab("Video files", active: !showsFolds) {
+                if showsFolds { filter = lastFileCollection.rawValue }
+            }
         }
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: 4) { choices }.fixedSize(horizontal: true, vertical: false)
@@ -233,6 +245,7 @@ struct LibraryView: View {
         do {
             try practice.select(step, in: id, reopen: false)
             findingFold = false
+            if case .lesson(_, let owner, _) = id { foldPlaybackOwner = owner }
             player = route
         } catch { library.error = error.localizedDescription }
     }
@@ -885,10 +898,10 @@ private struct FoldLibraryIndex: View {
                         }
                     }
                 }
-                EmptyStateAction(title: "Practice notebook", symbol: .fold, primary: false) {
-                    searchFocused = false
-                    notebook()
-                }
+            }
+            EmptyStateAction(title: "Practice notebook", symbol: .fold, primary: false) {
+                searchFocused = false
+                notebook()
             }
         }
     }
@@ -955,6 +968,7 @@ private struct FoldLibraryIndex: View {
                     }.fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                     Glyph(symbol: .back, size: 12, tint: PulsePlayerStyle.accent)
+                        .environment(\.layoutDirection, .leftToRight)
                         .rotationEffect(.degrees(isOpen ? 90 : -90)).accessibilityHidden(true)
                 }
                 .frame(minHeight: 48).contentShape(Rectangle())
