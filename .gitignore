@@ -1,0 +1,14 @@
+.DS_Store
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.ipa
+*.xcarchive/
+*.dSYM/
+*.xcresult/
+__pycache__/
+*.pyc
+*.log
+.idea/
+.vscode/

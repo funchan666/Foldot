@@ -1,0 +1,22 @@
+// PulsePlayer uses the toolkit development environment for Debug and Release.
+PRODUCT_BUNDLE_IDENTIFIER = im.seex.lobo
+// getV2 `name`; keep the original capitalisation.
+PULSEPLAYER_RELEASE_NAME = PulsePlayer
+PULSEPLAYER_API_HOST = devapi.io-jp.com
+// Business packageName and guest-login source.
+PULSEPLAYER_SERVICE_PACKAGE_NAME = $(PRODUCT_BUNDLE_IDENTIFIER)
+// Empty expansion preserves // in xcconfig URL values. Placeholders until production.
+PULSEPLAYER_WEBSITE_URL = https:/$()/example.com/
+PULSEPLAYER_PRIVACY_URL = https:/$()/example.com/
+PULSEPLAYER_TERMS_URL = https:/$()/example.com/
+IPHONEOS_DEPLOYMENT_TARGET = 17.0
+SWIFT_VERSION = 5.0
+TARGETED_DEVICE_FAMILY = 1
+MARKETING_VERSION = 1.0.0
+CURRENT_PROJECT_VERSION = 1
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM =
+// Google official iOS demo configuration (test builds only). Set NO and replace before publishing.
+PULSEPLAYER_ADS_TEST_MODE = YES
+PULSEPLAYER_GOOGLE_ADS_APP_ID = ca-app-pub-3940256099942544~1458002511
+OTHER_LDFLAGS = $(inherited) -ObjC

@@ -1,0 +1,26 @@
+{
+  "images": [
+    {
+      "idiom": "universal",
+      "scale": "1x",
+      "filename": "GlyphEdit.png"
+    },
+    {
+      "idiom": "universal",
+      "scale": "2x",
+      "filename": "GlyphEdit@2x.png"
+    },
+    {
+      "idiom": "universal",
+      "scale": "3x",
+      "filename": "GlyphEdit@3x.png"
+    }
+  ],
+  "properties": {
+    "template-rendering-intent": "template"
+  },
+  "info": {
+    "author": "xcode",
+    "version": 1
+  }
+}

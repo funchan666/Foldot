@@ -1,0 +1,334 @@
+import AVFoundation
+import SwiftUI
+
+enum ExportQuality: String, CaseIterable, Identifiable {
+    case full = "1080p", compact = "720p", small = "480p"
+    var id: String { rawValue }
+    var edge: CGFloat { self == .full ? 1920 : self == .compact ? 1280 : 854 }
+    var shortEdge: CGFloat { self == .full ? 1080 : self == .compact ? 720 : 480 }
+}
+enum VideoFrame: String, CaseIterable, Identifiable {
+    case original = "Original", portrait = "9:16", square = "1:1", landscape = "16:9"
+    var id: String { rawValue }
+    var ratio: CGFloat? { self == .original ? nil : self == .portrait ? 9 / 16 : self == .square ? 1 : 16 / 9 }
+}
+struct EditRecipe: Equatable {
+    var start: Double = 0
+    var end: Double = 0
+    var speed: Double = 1
+    var quarterTurns: Int = 0
+    var mirrored = false
+    var muted = false
+    var frame: VideoFrame = .original
+    var quality: ExportQuality = .full
+}
+
+func editableVideoDuration(for asset: AVURLAsset) async throws -> Double {
+    let duration = try await asset.load(.duration).seconds
+    let playable = try await asset.load(.isPlayable)
+    let tracks = try await asset.loadTracks(withMediaType: .video)
+    guard playable, duration.isFinite, duration > 0.1, !tracks.isEmpty else {
+        throw PulsePlayerError.unsupportedMedia
+    }
+    return duration
+}
+
+@MainActor
+final class VideoEditor: ObservableObject {
+    @Published var recipe = EditRecipe()
+    @Published private(set) var duration: Double = 0
+    @Published private(set) var thumbnails: [UIImage?] = []
+    @Published private(set) var isLoading = false
+    @Published private(set) var isExporting = false
+    @Published private(set) var isPreparingPreview = false
+    @Published private(set) var progress: Float = 0
+    @Published var error: String?
+    @Published var exportedURL: URL?
+    let preview = PlaybackController()
+    private var sourceURL: URL?
+    private var exporter: AVAssetExportSession?
+    private var revision = UUID()
+    private var cancelRequested = false
+    private var previewExporter: AVAssetExportSession?
+    @Published private var previewURL: URL?
+    private var previewRevision = UUID()
+    var isShowingSource: Bool { previewURL == nil }
+
+    func open(_ url: URL, onReady: () -> Void) async {
+        clearRenderedPreview()
+        let requestID = UUID()
+        revision = requestID
+        sourceURL = url
+        duration = 0
+        recipe = EditRecipe()
+        error = nil
+        isLoading = true
+        exportedURL = nil
+        thumbnails = []
+        preview.release()
+        do {
+            guard FileManager.default.isReadableFile(atPath: url.path) else {
+                throw PulsePlayerError.service("This file can’t be read. Choose the video again from Files.")
+            }
+            let asset = AVURLAsset(url: url)
+            let duration = try await editableVideoDuration(for: asset)
+            try Task.checkCancellation()
+            guard revision == requestID else { return }
+            self.duration = duration
+            recipe = EditRecipe(start: 0, end: duration)
+            preview.setSpeed(1)
+            preview.setMuted(false)
+            preview.load(url, autoplay: false)
+            isLoading = false
+            onReady()
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 264, height: 264)
+            let frameCount = 7
+            thumbnails = Array(repeating: nil, count: frameCount)
+            for step in 0..<frameCount {
+                try Task.checkCancellation()
+                let fraction = (Double(step) + 0.5) / Double(frameCount)
+                let time = CMTime(seconds: duration * fraction, preferredTimescale: 600)
+                if let result = try? await generator.image(at: time) {
+                    guard revision == requestID else { return }
+                    thumbnails[step] = UIImage(cgImage: result.image)
+                }
+            }
+        } catch is CancellationError {
+            if revision == requestID { isLoading = false }
+        } catch {
+            guard revision == requestID else { return }
+            self.error = error.localizedDescription
+            sourceURL = nil
+            isLoading = false
+        }
+    }
+
+    func retryPlayback() {
+        guard let url = previewURL ?? sourceURL else { return }
+        preview.load(url, autoplay: true)
+    }
+
+    func restoreSourcePreview(seekTo time: Double) {
+        showSourcePreview()
+        preview.stopRepeating()
+        preview.seek(time)
+    }
+
+    func playRange(_ range: ClosedRange<Double>) {
+        showSourcePreview()
+        preview.playRepeating(range)
+    }
+
+    private func showSourcePreview() {
+        guard let sourceURL, previewURL != nil || preview.error != nil else { return }
+        clearRenderedPreview()
+        preview.load(sourceURL, autoplay: false)
+    }
+
+    func applyPreview() async {
+        guard let sourceURL, !isExporting, !isPreparingPreview else { return }
+        let requestedRecipe = recipe
+        let requestID = revision
+        let previewID = UUID()
+        previewRevision = previewID
+        isPreparingPreview = true
+        error = nil
+        preview.pause()
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("PulsePlayer-preview-\(previewID).mp4")
+        var retained = false
+        defer {
+            if !retained { try? FileManager.default.removeItem(at: output) }
+            if previewRevision == previewID { isPreparingPreview = false; previewExporter = nil }
+        }
+        do {
+            // Materialize a bounded-resolution preview. Some simulator runtimes cannot
+            // play AVVideoComposition directly even when the same composition exports.
+            var previewRecipe = requestedRecipe
+            previewRecipe.quality = .compact
+            let (composition, video) = try await compose(url: sourceURL, recipe: previewRecipe)
+            guard requestID == revision, previewRevision == previewID, recipe == requestedRecipe else { return }
+            guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+                throw PulsePlayerError.unsupportedMedia
+            }
+            previewExporter = session
+            session.videoComposition = video
+            session.outputURL = output
+            session.outputFileType = .mp4
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    session.exportAsynchronously { continuation.resume() }
+                }
+            } onCancel: { session.cancelExport() }
+            try Task.checkCancellation()
+            guard requestID == revision, previewRevision == previewID, recipe == requestedRecipe else { return }
+            guard session.status == .completed else {
+                throw session.error ?? PulsePlayerError.service("Preview could not be prepared. Please try again.")
+            }
+            let previousURL = previewURL
+            preview.setMuted(false)
+            preview.setSpeed(1)
+            preview.load(output, autoplay: true)
+            previewURL = output
+            retained = true
+            if let previousURL { try? FileManager.default.removeItem(at: previousURL) }
+        } catch {
+            if requestID == revision, previewRevision == previewID, !(error is CancellationError) {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    func export(audioOnly: Bool = false) async -> URL? {
+        guard let sourceURL, !isExporting, !isPreparingPreview else { return nil }
+        isExporting = true
+        cancelRequested = false
+        progress = 0
+        error = nil
+        preview.pause()
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("PulsePlayer-\(UUID().uuidString).\(audioOnly ? "m4a" : "mp4")")
+        defer { isExporting = false; exporter = nil }
+        var progressTask: Task<Void, Never>?
+        defer { progressTask?.cancel() }
+        do {
+            let (composition, video) = try await compose(url: sourceURL, recipe: recipe)
+            try Task.checkCancellation()
+            if cancelRequested { throw CancellationError() }
+            if audioOnly, composition.tracks(withMediaType: .audio).isEmpty {
+                throw PulsePlayerError.service("This clip has no audio. Turn off Mute if you want to extract its soundtrack.")
+            }
+            guard let session = AVAssetExportSession(asset: composition, presetName: audioOnly ? AVAssetExportPresetAppleM4A : AVAssetExportPresetHighestQuality) else { throw PulsePlayerError.unsupportedMedia }
+            exporter = session
+            session.outputURL = output
+            session.outputFileType = audioOnly ? .m4a : .mp4
+            if !audioOnly { session.videoComposition = video }
+            session.shouldOptimizeForNetworkUse = true
+            progressTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    self?.progress = session.progress
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
+            }
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    session.exportAsynchronously { continuation.resume() }
+                }
+            } onCancel: { session.cancelExport() }
+            switch session.status {
+            case .completed:
+                guard FileManager.default.fileExists(atPath: output.path),
+                      (try output.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) > 0 else { throw PulsePlayerError.storage }
+                progress = 1
+                exportedURL = output
+                return output
+            case .cancelled: throw CancellationError()
+            default: throw session.error ?? PulsePlayerError.service("Export could not finish. Your original video is unchanged.")
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: output)
+            self.error = error is CancellationError ? "Export cancelled. Your original video is unchanged." : error.localizedDescription
+            return nil
+        }
+    }
+
+    /// A notebook clip keeps the source framing and sound, and uses the same boundaries as practice playback.
+    static func writeFold(_ step: FoldPracticeStep, in entry: FoldPracticeEntry,
+                          source: URL, destination: URL) async throws {
+        let asset = AVURLAsset(url: source, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        let duration = try await editableVideoDuration(for: asset)
+        guard let range = entry.loopRange(for: step, duration: duration),
+              range.lowerBound >= 0 else {
+            throw PulsePlayerError.service("This fold is outside the current video. Mark it again in the player.")
+        }
+        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality),
+              session.supportedFileTypes.contains(.mp4) else { throw PulsePlayerError.unsupportedMedia }
+        session.timeRange = CMTimeRange(start: CMTime(seconds: range.lowerBound, preferredTimescale: 600),
+                                       end: CMTime(seconds: range.upperBound, preferredTimescale: 600))
+        session.outputURL = destination
+        session.outputFileType = .mp4
+        if let crane = Bundle.main.url(forResource: "PaperCrane", withExtension: "mp4"),
+           source.standardizedFileURL == crane.standardizedFileURL {
+            let credit = AVMutableMetadataItem()
+            credit.identifier = .commonIdentifierDescription
+            credit.value = "Excerpt from OrigamiCrane by Tavin (2010), trimmed and re-encoded. https://commons.wikimedia.org/wiki/File:OrigamiCrane.ogv • CC BY 3.0 https://creativecommons.org/licenses/by/3.0/" as NSString
+            session.metadata = [credit]
+        }
+        try Task.checkCancellation()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                session.exportAsynchronously { continuation.resume() }
+                if Task.isCancelled { session.cancelExport() }
+            }
+        } onCancel: { session.cancelExport() }
+        try Task.checkCancellation()
+        guard session.status == .completed,
+              (try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) > 0 else {
+            throw session.error ?? PulsePlayerError.service("Video export failed. Please try again.")
+        }
+    }
+    func cancelExport() { cancelRequested = true; exporter?.cancelExport() }
+    func close() { revision = UUID(); clearRenderedPreview(); preview.release(); cancelExport() }
+
+    private func clearRenderedPreview() {
+        previewRevision = UUID()
+        previewExporter?.cancelExport()
+        previewExporter = nil
+        isPreparingPreview = false
+        preview.release()
+        if let previewURL { try? FileManager.default.removeItem(at: previewURL) }
+        previewURL = nil
+    }
+
+    private func compose(url: URL, recipe: EditRecipe) async throws -> (AVMutableComposition, AVMutableVideoComposition) {
+        let source = AVURLAsset(url: url)
+        guard let videoSource = try await source.loadTracks(withMediaType: .video).first else { throw PulsePlayerError.unsupportedMedia }
+        let sourceDuration = try await source.load(.duration).seconds
+        let start = max(0, min(recipe.start, sourceDuration - 0.1))
+        let end = max(start + 0.1, min(recipe.end, sourceDuration))
+        let range = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600), duration: CMTime(seconds: end - start, preferredTimescale: 600))
+        let composition = AVMutableComposition()
+        guard let track = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { throw PulsePlayerError.unsupportedMedia }
+        try track.insertTimeRange(range, of: videoSource, at: .zero)
+        if !recipe.muted {
+            for audioSource in try await source.loadTracks(withMediaType: .audio) {
+                guard let audio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else { continue }
+                let audioRange = try await audioSource.load(.timeRange)
+                let overlap = CMTimeRangeGetIntersection(range, otherRange: audioRange)
+                if overlap.duration.seconds > 0 {
+                    try audio.insertTimeRange(overlap, of: audioSource, at: CMTimeSubtract(overlap.start, range.start))
+                }
+            }
+        }
+        let speed = max(0.25, min(recipe.speed, 4))
+        composition.scaleTimeRange(CMTimeRange(start: .zero, duration: range.duration),
+                                   toDuration: CMTime(seconds: (end - start) / speed, preferredTimescale: 600))
+        let naturalSize = try await videoSource.load(.naturalSize)
+        var transform = try await videoSource.load(.preferredTransform)
+        transform = transform.concatenating(CGAffineTransform(rotationAngle: CGFloat(recipe.quarterTurns % 4) * .pi / 2))
+        if recipe.mirrored { transform = transform.concatenating(CGAffineTransform(scaleX: -1, y: 1)) }
+        let bounds = CGRect(origin: .zero, size: naturalSize).applying(transform).standardized
+        guard bounds.width > 0, bounds.height > 0 else { throw PulsePlayerError.unsupportedMedia }
+        transform = transform.concatenating(CGAffineTransform(translationX: -bounds.minX, y: -bounds.minY))
+        var crop = bounds.size
+        if let ratio = recipe.frame.ratio {
+            if crop.width / crop.height > ratio { crop.width = crop.height * ratio }
+            else { crop.height = crop.width / ratio }
+        }
+        transform = transform.concatenating(CGAffineTransform(translationX: -(bounds.width - crop.width) / 2, y: -(bounds.height - crop.height) / 2))
+        let scale = min(1, min(recipe.quality.edge / max(crop.width, crop.height),
+                               recipe.quality.shortEdge / min(crop.width, crop.height)))
+        let render = CGSize(width: max(2, floor(crop.width * scale / 2) * 2), height: max(2, floor(crop.height * scale / 2) * 2))
+        transform = transform.concatenating(CGAffineTransform(scaleX: render.width / crop.width, y: render.height / crop.height))
+        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
+        layer.setTransform(transform, at: .zero)
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: composition.duration)
+        instruction.layerInstructions = [layer]
+        let video = AVMutableVideoComposition()
+        video.renderSize = render
+        video.frameDuration = CMTime(value: 1, timescale: 30)
+        video.instructions = [instruction]
+        return (composition, video)
+    }
+}
