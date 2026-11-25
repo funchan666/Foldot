@@ -2,6 +2,7 @@ import SwiftUI
 import StoreKit
 
 struct PlusEntryButton: View {
+    var isActive = false
     let action: () -> Void
 
     var body: some View {
@@ -9,7 +10,7 @@ struct PlusEntryButton: View {
         return Button(action: action) {
             HStack(spacing: 6) {
                 Glyph(symbol: .pass, size: 15, tint: PulsePlayerStyle.accent)
-                LocalizedText("Plus").font(.capture(.footnote, weight: .semibold))
+                LocalizedText(isActive ? "Plus active" : "Plus").font(.capture(.footnote, weight: .semibold))
             }
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 12).padding(.vertical, 5)
@@ -20,25 +21,13 @@ struct PlusEntryButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressStyle())
-        .accessibilityLabel(LocalizedStringKey("PulsePlayer Plus"))
+        .accessibilityLabel(LocalizedStringKey(isActive ? "Plus active" : "PulsePlayer Plus"))
         .accessibilityIdentifier("membership.tabEntry")
     }
 }
 
 struct MembershipView: View {
-    enum Entry {
-        case account, media, foldVideo, frameComparison
-
-        var explanation: String? {
-            switch self {
-            case .account: return nil
-            case .media: return "Export is included with Plus."
-            case .foldVideo: return "Save just this fold as a video with Plus."
-            case .frameComparison: return "Keep the frames of this fold as a collage or separate images with Plus."
-            }
-        }
-    }
-    var entry: Entry = .account
+    @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.locale) private var locale
     @EnvironmentObject private var api: APIClient
     @EnvironmentObject private var commerce: CommerceStore
@@ -66,47 +55,51 @@ struct MembershipView: View {
     private var interactionLocked: Bool { purchasing || loadingCatalog || ads.busy || ads.isPresenting }
 
     var body: some View {
-        ScrollViewReader { scroll in
-            VStack(spacing: 0) {
-                HStack(spacing: 12) {
-                    IconButton(symbol: .close, label: "Close", glass: true) { dismiss() }
-                        .disabled(purchasing || ads.isPresenting)
-                    Spacer(minLength: 0)
-                    restoreButton { scroll.scrollTo("purchaseStatus", anchor: .top) }
-                }
-                .pageHorizontalMargins().frame(maxWidth: 640).frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
+        GeometryReader { viewport in
+            let bounds = CGRect(origin: .zero, size: viewport.size)
+            let hasFold = PulsePlayerStyle.intersectsReservedRegion(bounds, in: viewport)
+            let sideBySide = PulsePlayerStyle.pageContentWidth(in: viewport) >= 310 && typeSize <= .xLarge && !hasFold
+            let dockCheckout = viewport.size.height >= 570 && typeSize <= .xxLarge && !hasFold
+            ScrollViewReader { scroll in
+                VStack(spacing: 0) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 26) {
+                            HStack(alignment: .top, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    benefit(.download, "No daily viewing or download limits")
+                                    benefit(.play, "Skip opening ads")
+                                }
+                                IconButton(symbol: .close, label: "Close", glass: true) { dismiss() }
+                                    .accessibilityValue(Text("PulsePlayer Plus"))
+                                    .disabled(purchasing || ads.isPresenting)
+                            }
+                            .pulsePlayerKeepControlsTogether()
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            SceneTitle("PulsePlayer Plus", size: 36)
-                            if let explanation = entry.explanation, !commerce.hasVerifiedPlus {
-                                LocalizedText(explanation)
-                                    .font(.capture(.subheadline, weight: .semibold))
-                                    .foregroundStyle(PulsePlayerStyle.accent)
+                            VStack(alignment: .leading, spacing: 12) {
+                                if purchaseAction != nil || commerce.canRetryPurchaseConfirmation { purchaseFeedback }
+                                if commerce.premium {
+                                    activeMembership
+                                } else {
+                                    planSelection(sideBySide: sideBySide)
+                                }
+                            }
+                            .pulsePlayerKeepControlsTogether()
+                            .id("purchaseStatus")
+
+                            if !dockCheckout { purchaseControls }
+                            VStack(alignment: .leading, spacing: 0) {
+                                restoreButton { scroll.scrollTo("purchaseStatus", anchor: .top) }
+                                PolicyLinks(style: .buttons)
                             }
                         }
-                        if commerce.premium {
-                            activeMembership
-                            if entry.explanation != nil, commerce.hasVerifiedPlus {
-                                ActionButton(title: "Return to export") { dismiss() }.disabled(purchasing)
-                            }
-                        }
-                        benefits
-                        Divider()
-                        VStack(alignment: .leading, spacing: 12) {
-                            if purchaseAction != nil || commerce.canRetryPurchaseConfirmation { purchaseFeedback }
-                            if !commerce.premium { planSelection }
-                            purchaseControls
-                        }
-                        .pulsePlayerKeepControlsTogether()
-                        .id("purchaseStatus")
-                        PolicyLinks(style: .inline)
+                        .pulsePlayerPage()
                     }
-                    .pageHorizontalMargins().frame(maxWidth: 640)
-                    .frame(maxWidth: .infinity, alignment: .top)
-                    .padding(.top, 18).padding(.bottom, 26)
+                    if dockCheckout {
+                        purchaseControls
+                            .pageHorizontalMargins()
+                            .frame(maxWidth: 680)
+                            .padding(.bottom, 12)
+                    }
                 }
                 .onChange(of: commerce.error ?? commerce.message) { _, feedback in
                     if feedback != nil, purchaseAction != nil || commerce.canRetryPurchaseConfirmation {
@@ -138,17 +131,12 @@ struct MembershipView: View {
                 }
             }.disabled(interactionLocked).accessibilityIdentifier("membership.retryPurchase")
         } else if !commerce.premium, !configuredPlans.isEmpty {
-            if !loadingCatalog, let selectedPlan { renewalDisclosure(for: selectedPlan) }
-            checkoutButton
-        }
-    }
-
-    private var benefits: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            benefit(.fold, "Save a single fold as a video")
-            benefit(.edit, "Share frame comparisons, edited videos and audio")
-            benefit(.download, "No daily viewing or download limits")
-            benefit(.play, "Skip opening ads")
+            VStack(spacing: 10) {
+                if !loadingCatalog, let selectedPlan { renewalDisclosure(for: selectedPlan) }
+                checkoutButton
+            }
+            .multilineTextAlignment(.center)
+            .pulsePlayerKeepControlsTogether()
         }
     }
 
@@ -186,7 +174,7 @@ struct MembershipView: View {
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .pulsePlayerPanel(cornerRadius: 18)
+        .pulsePlayerGlass(in: .rect(cornerRadius: 18), interactive: false)
     }
 
     @ViewBuilder private var purchaseFeedback: some View {
@@ -198,31 +186,21 @@ struct MembershipView: View {
         }
     }
 
-    private var planSelection: some View {
+    private func planSelection(sideBySide: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            LocalizedText("Subscription plans").font(.capture(.headline))
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityAddTraits(.isHeader)
             if configuredPlans.isEmpty {
-                LocalizedText("Subscription setup is incomplete. Please contact support.")
-                    .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                EmptyStateScene(appearance: .inline(.pass), message: "Subscription setup is incomplete. Please contact support.")
             } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(configuredPlans) { entry in
-                        planOption(entry)
-                        if entry.id != configuredPlans.last?.id { Divider() }
+                if !plans.isEmpty {
+                    let columnCount = sideBySide ? min(plans.count, 2) : 1
+                    let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: columnCount)
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+                        ForEach(plans, id: \.productIdentifier) { product in planOption(product) }
                     }
                 }
-                if plans.count < configuredPlans.count {
-                    LocalizedText("USD reference prices. Apple confirms your local price before payment.")
-                        .font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
                 if !loadingCatalog, plans.count < configuredPlans.count {
-                    LocalizedText(commerce.plansError ?? "This plan isn’t available from Apple yet. Please try again later.")
-                        .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    EmptyStateScene(appearance: .inline(.pass),
+                                    message: commerce.plansError ?? "This plan isn’t available from Apple yet. Please try again later.")
                     if selectedPlan != nil {
                         Button(action: reloadPlans) {
                             LocalizedText("Reload plans")
@@ -240,75 +218,47 @@ struct MembershipView: View {
         if commerce.preparingPurchase { return "Preparing purchase…" }
         if commerce.busy { return "Checking purchases…" }
         if loadingCatalog { return "Loading plans…" }
-        return selectedPlan == nil ? "Check price" : "Subscribe"
+        return selectedPlan == nil ? "Check price" : "Subscribe to PulsePlayer Plus"
     }
 
-    @ViewBuilder private func planOption(_ entry: CommerceConfiguration.Product) -> some View {
-        let product = plans.first { $0.productIdentifier == entry.id }
-        let selected = selectedPlan?.productIdentifier == entry.id
-        let name = VStack(alignment: .leading, spacing: 4) {
-            planName(product, fallback: entry.label)
-            if let product {
-                planPeriod(commerce.period(product, locale: locale))
-            } else {
-                LocalizedText(entry.period == .month ? "Billed monthly" : "Billed yearly")
-                    .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+    private func planOption(_ product: SKProduct) -> some View {
+        let selected = selectedPlan?.productIdentifier == product.productIdentifier
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        return Button { selectedID = product.productIdentifier } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                planName(product)
+                    .font(.capture(.subheadline, weight: .medium))
+                Text(verbatim: commerce.price(product))
+                    .font(.capture(.title, weight: .semibold))
+                    .monospacedDigit()
             }
-        }
-        let price = VStack(alignment: .leading, spacing: 2) {
-            planPrice(product.map { commerce.price($0) } ?? "USD \(entry.displayPriceUSD)", selected: selected)
-            if selected {
-                LocalizedText("Selected").font(.capture(.caption, weight: .semibold)).foregroundStyle(PulsePlayerStyle.accent)
-            }
-        }
-        let label = ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 14) {
-                name.fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 4)
-                price.fixedSize(horizontal: true, vertical: false)
-            }
-            VStack(alignment: .leading, spacing: 8) { name; price }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 12)
-        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
-        .background(selected ? PulsePlayerStyle.mist : Color.clear, in: .rect(cornerRadius: 10))
-        .contentShape(Rectangle())
-        if let product {
-            Button { selectedID = product.productIdentifier } label: { label }
-                .buttonStyle(PressStyle()).disabled(interactionLocked)
-                .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(selected ? .isSelected : [])
-                .accessibilityIdentifier("membership.plan.\(entry.id)")
-        } else {
-            label.accessibilityElement(children: .combine)
-        }
-    }
-
-    private func planName(_ product: SKProduct?, fallback: String) -> some View {
-        Group {
-            if let period = product?.subscriptionPeriod, period.numberOfUnits == 1, period.unit == .month {
-                LocalizedText("Monthly")
-            } else if let period = product?.subscriptionPeriod, period.numberOfUnits == 1, period.unit == .year {
-                LocalizedText("Yearly")
-            } else if let product {
-                Text(verbatim: product.localizedTitle)
-            } else {
-                LocalizedText(fallback)
-            }
-        }.font(.capture(.headline, weight: .semibold))
+            .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func planPeriod(_ period: String) -> some View {
-        LocalizedText("Billed every %@", period).font(.capture(.footnote))
-            .foregroundStyle(PulsePlayerStyle.secondary).fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func planPrice(_ price: String, selected: Bool) -> some View {
-        Text(verbatim: price).environment(\.layoutDirection, .leftToRight)
-            .font(.capture(.title2, weight: .semibold)).monospacedDigit()
+            .padding(16)
+            .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
             .foregroundStyle(selected ? PulsePlayerStyle.accent : PulsePlayerStyle.paper)
-            .fixedSize(horizontal: false, vertical: true)
+            .pulsePlayerGlass(in: shape, tint: selected ? PulsePlayerStyle.accent.opacity(0.15) : nil,
+                              fallback: selected ? PulsePlayerStyle.mist : PulsePlayerStyle.raised)
+            .overlay {
+                if selected { shape.strokeBorder(PulsePlayerStyle.accent, lineWidth: 2).allowsHitTesting(false) }
+            }
+            .contentShape(.interaction, shape)
+        }
+        .buttonStyle(PressStyle())
+        .disabled(interactionLocked)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("membership.plan.\(product.productIdentifier)")
+    }
+
+    @ViewBuilder private func planName(_ product: SKProduct) -> some View {
+        if let period = product.subscriptionPeriod, period.numberOfUnits == 1, period.unit == .month {
+            LocalizedText("Monthly")
+        } else if let period = product.subscriptionPeriod, period.numberOfUnits == 1, period.unit == .year {
+            LocalizedText("Yearly")
+        } else {
+            Text(verbatim: commerce.period(product, locale: locale))
+        }
     }
 
     private func renewalDisclosure(for plan: SKProduct) -> some View {
@@ -328,8 +278,8 @@ struct MembershipView: View {
             }
             .padding(.horizontal, 20).padding(.vertical, 8)
             .frame(maxWidth: .infinity, minHeight: 52)
-            .foregroundStyle(PulsePlayerStyle.paper)
-            .pulsePlayerGlass(in: Capsule(), tint: PulsePlayerStyle.accent.opacity(0.22), fallback: PulsePlayerStyle.mist)
+            .foregroundStyle(PulsePlayerStyle.ink)
+            .pulsePlayerGlass(in: Capsule(), tint: PulsePlayerStyle.accent, fallback: PulsePlayerStyle.accent, onDark: true)
             .contentShape(.interaction, Capsule())
         }
         .buttonStyle(PressStyle())
@@ -361,16 +311,20 @@ struct MembershipView: View {
             onRestore()
         } label: {
             LocalizedText("Restore purchases")
-                .font(.capture(.footnote, weight: .semibold))
+                .font(.capture(.subheadline, weight: .semibold))
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14).padding(.vertical, 6)
-                .frame(minWidth: 44, minHeight: 44)
+                .frame(minWidth: 44, minHeight: 44, alignment: .leading)
                 .foregroundStyle(PulsePlayerStyle.accent)
-                .pulsePlayerGlass(in: Capsule(), fallback: PulsePlayerStyle.raised)
-                .contentShape(.interaction, Capsule())
+                .contentShape(Rectangle())
         }.disabled(interactionLocked).buttonStyle(PressStyle())
             .accessibilityIdentifier("membership.restore")
     }
+}
+
+enum SettingsPage: Hashable {
+    case storage, usage, language, history, browse
+    case editor(UUID, VideoTool)
+    case document(PolicyDocument)
 }
 
 struct AccountView: View {
@@ -378,168 +332,234 @@ struct AccountView: View {
     @Environment(\.locale) private var locale
     @EnvironmentObject private var api: APIClient
     @EnvironmentObject private var commerce: CommerceStore
-    @EnvironmentObject private var quota: QuotaStore
     @EnvironmentObject private var ads: RewardedAds
     @EnvironmentObject private var accountAccess: AccountAccessFlow
     let openFavorites: () -> Void
-    let openHistory: () -> Void
     let openFolders: () -> Void
+    let openSearch: () -> Void
+    @EnvironmentObject private var library: LibraryStore
     @AppStorage(LocalPlaybackResume.enabledKey) private var resumesPlayback = true
     @AppStorage(LocalPlaybackPreferences.speedKey) private var defaultLocalSpeed = 1.0
     @AppStorage(LocalPlaybackPreferences.loopKey) private var loopsLocalPlayback = false
+    @Binding var path: [SettingsPage]
+    @State private var pickingSpeed = false
     @State private var paywall = false
-    @State private var allowancePrompt: AllowanceKind?
-    @State private var showingStorage = false
-    @State private var showingSpeedPicker = false
+
     private var unavailable: Bool {
         accountAccess.isBusy || commerce.busy || commerce.preparingPurchase || ads.busy || ads.isPresenting
     }
 
     var body: some View {
-        ScenePage(depth: 44, openingGap: 14, scrollsBehindTabBar: true) { _ in
-            VStack(alignment: .leading, spacing: 12) {
-                SceneTitle("Settings", size: 26)
+        ScenePage(scrollsBehindTabBar: true) { container in
+            let width = min(640, PulsePlayerStyle.pageContentWidth(in: container))
+            let hasFold = PulsePlayerStyle.intersectsReservedRegion(CGRect(origin: .zero, size: container.size), in: container)
+            VStack(alignment: .leading, spacing: 24) {
                 membershipEntry
+                    .pulsePlayerKeepControlsTogether()
+                if api.configuration.websiteURL != nil || api.configuration.termsURL != nil || api.configuration.privacyURL != nil {
+                    PolicyLinks(style: .settings, navigate: { path.append(.document($0)) })
+                        .disabled(unavailable || ads.isPreparingAppOpen)
+                }
+                playbackSettings(stacked: width < 300 || typeSize > .xLarge || hasFold)
+                    .pulsePlayerKeepControlsTogether()
+                libraryShortcuts(width: hasFold ? 0 : width)
+                    .pulsePlayerKeepControlsTogether()
+                VStack(alignment: .leading, spacing: 0) {
+                    if api.session != nil {
+                        settingsDestination("Daily limits", symbol: .download) { path.append(.usage) }
+                            .accessibilityIdentifier("account.usageDetails")
+                    } else {
+                        ConnectionPanel()
+                    }
+                    AccountSettingsSection(unavailable: unavailable || ads.isPreparingAppOpen, openLanguage: { path.append(.language) })
+                }
+                .pulsePlayerKeepControlsTogether()
             }
-        } content: { container in
-            accountContent(in: container)
         }
         .fullScreenCover(isPresented: $paywall) { MembershipView() }
-        .fullScreenCover(item: $allowancePrompt) { kind in AllowanceLimitPrompt(kind: kind) }
-        .sheet(isPresented: $showingStorage) { VideoStorageView() }
-        .sheet(isPresented: $showingSpeedPicker) { localSpeedPicker }
-    }
-
-    private func accountContent(in container: GeometryProxy) -> some View {
-        let bounds = CGRect(origin: .zero, size: container.size)
-        let width = min(640, PulsePlayerStyle.pageContentWidth(in: container))
-        let hasReservedRegion = PulsePlayerStyle.intersectsReservedRegion(bounds, in: container)
-        let wide = api.session != nil && width >= 620 && typeSize <= .xLarge && !hasReservedRegion
-        let layout = wide ? AnyLayout(HStackLayout(alignment: .top, spacing: 24))
-                          : AnyLayout(VStackLayout(alignment: .leading, spacing: 24))
-
-        return layout {
-            VStack(alignment: .leading, spacing: 12) {
-                if api.session != nil {
-                    allowance
-                    accountDetails
-                } else { ConnectionPanel() }
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .leading, spacing: 14) {
-                libraryShortcuts
-                playbackSettings
-                AccountSettingsSection()
+        .sheet(isPresented: $pickingSpeed) { localSpeedPicker }
+        .navigationDestination(for: SettingsPage.self) { page in
+            Group {
+                switch page {
+                case .history:
+                    VideoHistoryView(browseVideos: { path.append(.browse) },
+                                     edit: { path.append(.editor($0.id, .studio)) },
+                                     review: { path.append(.editor($0.id, .ranges)) })
+                case .browse: BrowseVideoListView(returnToLinkInput: openSearch)
+                case .editor(let id, let tool):
+                    EditorSheet(initialMovie: library.movies.first { $0.id == id }, initialTool: tool, pushed: true)
+                case .storage: VideoStorageView()
+                case .usage: DailyLimitsView()
+                case .language: LanguagePicker()
+                case .document(let document): PolicyBrowser(document: document, pushed: true)
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .toolbar(.hidden, for: .navigationBar, .tabBar)
         }
     }
 
-    private var libraryShortcuts: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(title: "Library").accessibilityAddTraits(.isHeader)
-            VStack(spacing: 0) {
-                Button(action: openHistory) {
-                    AccountLinkLabel(title: "Recently opened", symbol: .play)
+    private var membershipEntry: some View {
+        let active = commerce.hasVerifiedPlus
+        let layout = typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(alignment: .center, spacing: 14))
+        return Button { paywall = true } label: {
+            layout {
+                Glyph(symbol: .pass, size: 30, tint: PulsePlayerStyle.accent)
+                VStack(alignment: .leading, spacing: 3) {
+                    LocalizedText("PulsePlayer Plus")
+                        .font(.capture(.title3, weight: .bold))
+                        .foregroundStyle(PulsePlayerStyle.paper)
+                    LocalizedText(active ? "Plus active" : "View plans")
+                        .font(.capture(.subheadline, weight: .medium))
+                        .foregroundStyle(PulsePlayerStyle.accent)
                 }
-                Button(action: openFavorites) {
-                    AccountLinkLabel(title: "Favorites", symbol: .bookmark)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if !typeSize.isAccessibilitySize {
+                    Glyph(symbol: .back, size: 12, tint: PulsePlayerStyle.ink)
+                        .rotationEffect(.degrees(180))
+                        .frame(width: 32, height: 32)
+                        .background(PulsePlayerStyle.accent, in: Circle())
                 }
-                Button(action: openFolders) {
-                    AccountLinkLabel(title: "Folders", symbol: .folder)
-                }
-                Button { showingStorage = true } label: {
-                    AccountLinkLabel(title: "Video storage", symbol: .library)
-                }
-                .accessibilityIdentifier("settings.videoStorage")
             }
-            .buttonStyle(PressStyle())
-            .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 12), interactive: false)
+            .multilineTextAlignment(.leading)
+            .padding(.horizontal, 18).padding(.vertical, 14)
+            .frame(maxWidth: .infinity, minHeight: 78, alignment: .leading)
+            .pulsePlayerGlass(in: .rect(cornerRadius: 20), tint: PulsePlayerStyle.accent.opacity(0.20),
+                              fallback: PulsePlayerStyle.mist)
+            .contentShape(.interaction, .rect(cornerRadius: 20))
         }
+        .buttonStyle(PressStyle())
+        .disabled(unavailable)
+        .accessibilityLabel(Text("PulsePlayer Plus"))
+        .accessibilityValue(active ? Text("Plus active") : Text(verbatim: ""))
+        .accessibilityHint(Text(LocalizedStringKey(active ? "View membership" : "View plans")))
+        .accessibilityIdentifier("account.membership")
     }
 
-    private var playbackSettings: some View {
-        let selected = LocalPlaybackPreferences.label(LocalPlaybackPreferences.speed(defaultLocalSpeed), locale: locale)
-
-        return VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(title: "Local playback").accessibilityAddTraits(.isHeader)
-            VStack(alignment: .leading, spacing: 0) {
-                Button { showingSpeedPicker = true } label: {
-                    HStack(spacing: 10) {
-                        LocalizedText("Default speed").font(.capture(.subheadline, weight: .medium))
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 4)
-                        Text(verbatim: selected).font(.capture(.subheadline)).monospacedDigit()
-                            .foregroundStyle(PulsePlayerStyle.secondary)
-                        Glyph(symbol: .back, size: 10, tint: PulsePlayerStyle.secondary).rotationEffect(.degrees(180))
+    private func playbackSettings(stacked: Bool) -> some View {
+        let speed = LocalPlaybackPreferences.label(LocalPlaybackPreferences.speed(defaultLocalSpeed), locale: locale)
+        let header = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+                             : AnyLayout(HStackLayout(spacing: 12))
+        return VStack(alignment: .leading, spacing: 4) {
+            header {
+                SectionLabel(title: "Local playback")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+                Button { pickingSpeed = true } label: {
+                    HStack(spacing: 8) {
+                        LocalizedText("Default speed").font(.capture(.footnote, weight: .medium))
+                        Text(verbatim: speed).font(.capture(.subheadline, weight: .bold)).monospacedDigit()
                     }
-                    .padding(12)
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
+                    .foregroundStyle(PulsePlayerStyle.accent)
+                    .padding(.horizontal, 12).frame(minHeight: 44)
+                    .pulsePlayerGlass(in: Capsule(), fallback: PulsePlayerStyle.mist)
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(PressStyle())
                 .accessibilityLabel(LocalizedStringKey("Default speed"))
-                .accessibilityValue(Text(verbatim: selected))
+                .accessibilityValue(Text(verbatim: speed))
                 .accessibilityIdentifier("settings.defaultLocalSpeed")
-
-                Divider().padding(.horizontal, 12)
-
-                Toggle(isOn: $resumesPlayback) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        LocalizedText("Resume playback").font(.capture(.subheadline, weight: .medium))
-                        LocalizedText("Continue local videos from the last position.")
-                            .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(12)
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("settings.resumePlayback")
-
-                Divider().padding(.horizontal, 12)
-
-                Toggle(isOn: $loopsLocalPlayback) {
-                    LocalizedText("Loop playback").font(.capture(.subheadline, weight: .medium))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(12)
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("settings.loopLocalPlayback")
             }
-            .tint(PulsePlayerStyle.accent)
-            .pulsePlayerGlass(in: .rect(cornerRadius: 12), interactive: false)
+            VStack(spacing: 0) {
+                Toggle(isOn: $resumesPlayback) { LocalizedText("Resume playback") }
+                    .frame(minHeight: 48)
+                    .accessibilityHint("Continue local videos from the last position.")
+                    .accessibilityIdentifier("settings.resumePlayback")
+                Divider()
+                Toggle(isOn: $loopsLocalPlayback) { LocalizedText("Loop playback") }
+                    .frame(minHeight: 48)
+                    .accessibilityIdentifier("settings.loopLocalPlayback")
+            }
+            .padding(.horizontal, 14)
+            .background(PulsePlayerStyle.surface, in: .rect(cornerRadius: 16))
+            .font(.capture(.subheadline, weight: .medium)).tint(PulsePlayerStyle.accent)
         }
+    }
+
+    private func libraryShortcuts(width: CGFloat) -> some View {
+        let count = width < 280 || typeSize.isAccessibilitySize ? 1 : (width >= 580 && typeSize <= .xLarge ? 4 : 2)
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: count)
+        return VStack(alignment: .leading, spacing: 10) {
+            SectionLabel(title: "Library").accessibilityAddTraits(.isHeader)
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
+                shortcut("Recently opened", symbol: .play) { path.append(.history) }
+                shortcut("Favorites", symbol: .bookmark, action: openFavorites)
+                shortcut("Folders", symbol: .folder, action: openFolders)
+                shortcut("Video storage", symbol: .library) { path.append(.storage) }
+                    .accessibilityIdentifier("settings.videoStorage")
+            }
+        }
+    }
+
+    private func shortcut(_ title: String, symbol: PulsePlayerGlyph, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Glyph(symbol: symbol, size: 17, tint: PulsePlayerStyle.accent)
+                LocalizedText(title).font(.capture(.subheadline, weight: .medium))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+            .pulsePlayerGlass(in: .rect(cornerRadius: 14), fallback: PulsePlayerStyle.surface)
+            .contentShape(.interaction, .rect(cornerRadius: 14))
+        }
+        .buttonStyle(PressStyle())
+    }
+
+    private func settingsDestination(_ title: String, symbol: PulsePlayerGlyph,
+                                     action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 12) {
+                Glyph(symbol: symbol, size: 18, tint: PulsePlayerStyle.secondary)
+                LocalizedText(title).font(.capture(.body, weight: .medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+                Glyph(symbol: .back, size: 11, tint: PulsePlayerStyle.secondary).rotationEffect(.degrees(180))
+            }
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+            .overlay(alignment: .top) { Divider() }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
     }
 
     private var localSpeedPicker: some View {
         VStack(spacing: 0) {
-            SheetHeading(title: "Default speed") { showingSpeedPicker = false }
+            SheetToolbar(context: "Default speed") { pickingSpeed = false }
             ScrollView {
-                VStack(spacing: 0) {
+                let columns = [GridItem(.adaptive(minimum: typeSize.isAccessibilitySize ? 134 : 84), spacing: 10)]
+                LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(LocalPlaybackPreferences.speeds, id: \.self) { rate in
                         let selected = LocalPlaybackPreferences.speed(defaultLocalSpeed) == rate
                         Button {
                             defaultLocalSpeed = Double(rate)
-                            showingSpeedPicker = false
+                            pickingSpeed = false
                         } label: {
-                            HStack(spacing: 12) {
-                                Text(verbatim: LocalPlaybackPreferences.label(rate, locale: locale))
-                                    .font(.capture(.subheadline, weight: selected ? .semibold : .regular))
-                                    .monospacedDigit()
-                                Spacer(minLength: 0)
-                                if selected {
-                                    LocalizedText("Selected").font(.capture(.caption))
-                                        .foregroundStyle(PulsePlayerStyle.accent)
+                            Text(verbatim: LocalPlaybackPreferences.label(rate, locale: locale))
+                                .font(.capture(.headline, weight: selected ? .bold : .regular)).monospacedDigit()
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(8)
+                                .frame(maxWidth: .infinity, minHeight: 52)
+                                .foregroundStyle(selected ? PulsePlayerStyle.accent : PulsePlayerStyle.paper)
+                                .pulsePlayerGlass(in: Capsule(), tint: selected ? PulsePlayerStyle.accent.opacity(0.18) : nil,
+                                                  fallback: selected ? PulsePlayerStyle.mist : PulsePlayerStyle.raised)
+                                .overlay {
+                                    if selected {
+                                        Capsule().strokeBorder(PulsePlayerStyle.accent, lineWidth: 1.5).allowsHitTesting(false)
+                                    }
                                 }
-                            }
-                            .padding(.horizontal, 14).padding(.vertical, 8)
-                            .frame(minHeight: 44)
-                            .contentShape(Rectangle())
+                                .contentShape(Capsule())
                         }
                         .buttonStyle(PressStyle())
                         .accessibilityAddTraits(selected ? .isSelected : [])
                     }
                 }
-                .pulsePlayerGlass(in: .rect(cornerRadius: 12), interactive: false)
+                .pulsePlayerKeepControlsTogether()
                 .pulsePlayerPage()
             }
         }
@@ -547,95 +567,52 @@ struct AccountView: View {
         .pulsePlayerScreenBackground()
         .presentationDetents([.medium, .large])
     }
+}
 
-    @ViewBuilder private var accountDetails: some View {
-        if let id = api.session?.userId.value {
-            LocalizedText("ID · %@", id).monospacedDigit().textSelection(.enabled)
-                .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
+private struct DailyLimitsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var commerce: CommerceStore
+    @EnvironmentObject private var quota: QuotaStore
+    @EnvironmentObject private var ads: RewardedAds
+    @EnvironmentObject private var accountAccess: AccountAccessFlow
+    @State private var reward: AllowanceKind?
+    @State private var paywall = false
 
-    private var membershipEntry: some View {
-        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        let title = VStack(alignment: .leading, spacing: 6) {
-            LocalizedText("PulsePlayer Plus")
-                .font(.capture(.title2, weight: .bold))
-                .fixedSize(horizontal: false, vertical: true)
-            if api.session != nil, commerce.premium || commerce.rightsVerified {
-                LocalizedText(commerce.premium ? "Plus active" : "Free plan")
-                    .font(.capture(.subheadline))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        let action = HStack(spacing: 8) {
-            LocalizedText(commerce.premium ? "View membership" : "View plans")
-                .font(.capture(.subheadline, weight: .semibold))
-                .fixedSize(horizontal: false, vertical: true)
-            Glyph(symbol: .back, size: 12, tint: .white).rotationEffect(.degrees(180))
-        }
-
-        return Button { paywall = true } label: {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 14) {
-                    title.fixedSize(horizontal: true, vertical: false)
-                    Spacer(minLength: 0)
-                    action.fixedSize(horizontal: true, vertical: false)
-                }
-                VStack(alignment: .leading, spacing: 12) {
-                    title
-                    action
-                }
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, minHeight: 100, alignment: .leading)
-            .multilineTextAlignment(.leading)
-            .foregroundStyle(.white)
-            .background(PulsePlayerStyle.accent, in: shape)
-            .contentShape(.interaction, shape)
-        }.buttonStyle(PressStyle()).disabled(unavailable)
-            .accessibilityIdentifier("account.membership")
-    }
-
-    private var allowance: some View {
-        let eligibleRewards = AllowanceKind.allCases.filter { quota.canRequestReward(for: $0, premium: commerce.premium) }
-        return VStack(alignment: .leading, spacing: 8) {
-            AllowanceStatusPanel()
-            if commerce.premium {
-                LocalizedText("Included with your membership")
-                    .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                if eligibleRewards.isEmpty {
-                    allowanceButton("Get more") { paywall = true }
-                        .accessibilityLabel("Get more daily views and downloads")
-                } else {
-                    ForEach(eligibleRewards) { kind in
-                        allowanceButton(kind == .watch ? "Get more views" : "Get more downloads") {
-                            allowancePrompt = kind
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if commerce.rightsVerified {
+                        LocalizedText(commerce.premium ? "Plus active" : "Free plan")
+                            .font(.capture(.subheadline, weight: .semibold))
+                            .foregroundStyle(PulsePlayerStyle.secondary)
+                    }
+                    AllowanceStatusPanel(compact: false)
+                    if !commerce.premium {
+                        let kinds = AllowanceKind.allCases.filter { quota.canRequestReward(for: $0, premium: false) }
+                        if kinds.isEmpty {
+                            Button { paywall = true } label: { LocalizedText("Get more") }
+                                .accessibilityLabel("Get more daily views and downloads")
+                        } else {
+                            ForEach(kinds) { kind in
+                                Button { reward = kind } label: {
+                                    LocalizedText(kind == .watch ? "Get more views" : "Get more downloads")
+                                }
+                            }
                         }
                     }
                 }
+                .buttonStyle(CompactActionStyle())
+                .disabled(accountAccess.isBusy || commerce.busy || commerce.preparingPurchase || ads.busy || ads.isPresenting)
+                .pulsePlayerKeepControlsTogether()
+                .pulsePlayerPage()
             }
         }
-    }
-
-    private func allowanceButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                LocalizedText(title).font(.capture(.footnote, weight: .semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-                Glyph(symbol: .back, size: 11, tint: PulsePlayerStyle.accent).rotationEffect(.degrees(180))
-            }
-            .padding(.horizontal, 12)
-            .frame(minWidth: 44, minHeight: 44)
-            .foregroundStyle(PulsePlayerStyle.accent)
-            .pulsePlayerGlass(in: Capsule(), fallback: PulsePlayerStyle.raised)
-            .contentShape(.interaction, Capsule())
-        }
-        .buttonStyle(PressStyle()).disabled(unavailable)
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        .foregroundStyle(PulsePlayerStyle.paper)
+        .pulsePlayerScreenBackground()
+        .sceneBack(context: "Daily limits") { dismiss() }
+        .fullScreenCover(item: $reward) { kind in AllowanceLimitPrompt(kind: kind) }
+        .fullScreenCover(isPresented: $paywall) { MembershipView() }
     }
 }
 
@@ -644,6 +621,8 @@ private struct VideoStorageView: View {
     @Environment(\.locale) private var locale
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var offline: OfflineStore
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @State private var importing = false
     @State private var sizes: [URL: Int64] = [:]
     @State private var measuredURLs: [URL]?
     @State private var removing: StoredFile?
@@ -680,6 +659,11 @@ private struct VideoStorageView: View {
             }
         }
 
+        var isAudio: Bool {
+            if case .library(let movie, _) = self { return movie.isAudio }
+            return false
+        }
+
         var isDownload: Bool {
             if case .download = self { return true }
             return false
@@ -693,65 +677,93 @@ private struct VideoStorageView: View {
         let urls = files.map(\.url)
         let measuring = !files.isEmpty && measuredURLs != urls
 
-        ScenePage(depth: 44, openingGap: 0) { _ in
-            HStack(spacing: 10) {
-                IconButton(symbol: .back, label: "Back", glass: true) { dismiss() }
-                SceneTitle("Video storage", size: 26)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        } content: { _ in
-            VStack(alignment: .leading, spacing: 16) {
+        ScenePage { container in
+            let width = PulsePlayerStyle.pageContentWidth(in: container)
+            let divided = PulsePlayerStyle.intersectsReservedRegion(CGRect(origin: .zero, size: container.size), in: container)
+            let stacked = width < 300 || divided || typeSize.isAccessibilitySize
+            VStack(alignment: .leading, spacing: 18) {
+                storageSummary(files, measuring: measuring, stacked: stacked)
                 if let removalError { ErrorNote(message: removalError) }
                 if files.isEmpty {
-                    EmptyStateScene(title: "No stored files")
-                } else if measuring {
-                    AccountLoadingIndicator(title: "Loading…")
-                } else {
-                    storageSummary(hasUnreadableFiles: files.contains { sizes[$0.url] == nil })
-                    LazyVStack(spacing: 0) {
-                        ForEach(files.sorted(by: storageOrder)) { file in
-                            storageRow(file)
-                            Divider().overlay(PulsePlayerStyle.line).accessibilityHidden(true)
-                        }
+                    LocalizedText("No stored files")
+                        .font(.capture(.subheadline)).foregroundStyle(PulsePlayerStyle.secondary)
+                }
+                VideoImportActions(onImported: { _ in }, importing: $importing,
+                                   presentation: files.isEmpty ? .sources(stacked: stacked) : .menu(title: "Import"))
+                LazyVStack(spacing: 0) {
+                    ForEach(files.sorted(by: storageOrder)) { file in
+                        storageRow(file, measuring: measuring)
+                        Divider().accessibilityHidden(true)
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .sceneBack(context: "Video storage", disabled: importing) { dismiss() }
+        .navigationBarBackButtonHidden(importing)
         .task(id: urls) { await measure(urls) }
         .sheet(item: $removing) { file in removalSheet(file) }
     }
 
-    private func storageSummary(hasUnreadableFiles: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            LocalizedText("Stored files").font(.capture(.subheadline, weight: .semibold))
-                .foregroundStyle(PulsePlayerStyle.secondary)
-                .accessibilityAddTraits(.isHeader)
-            if sizes.isEmpty {
+    private func storageSummary(_ files: [StoredFile], measuring: Bool, stacked: Bool) -> some View {
+        let categories = ["Imports", "Offline", "Exports"]
+        let counts = Dictionary(grouping: files, by: \.category).mapValues(\.count)
+        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                             : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Glyph(symbol: .library, size: 18, tint: PulsePlayerStyle.mediaAccent)
+                LocalizedText("Stored files").font(.capture(.subheadline, weight: .medium))
+            }
+            if measuring {
+                HStack(spacing: 8) {
+                    ProgressView().tint(PulsePlayerStyle.mediaAccent).accessibilityHidden(true)
+                    LocalizedText("Loading…").font(.capture(.subheadline))
+                }
+            } else if !files.isEmpty && sizes.isEmpty {
                 LocalizedText("Size unavailable").font(.capture(.headline))
             } else {
-                Text(verbatim: displaySize(sizes.values.reduce(0, +)))
-                    .font(.capture(.title2, weight: .semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-                if hasUnreadableFiles {
-                    LocalizedText("Some file sizes could not be read.")
-                        .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+                Text(verbatim: displaySize(files.isEmpty ? 0 : sizes.values.reduce(0, +)))
+                    .font(.capture(.largeTitle, weight: .bold)).monospacedDigit()
+                if files.contains(where: { sizes[$0.url] == nil }) {
+                    LocalizedText("Some file sizes could not be read.").font(.capture(.footnote))
+                }
+            }
+            Divider().overlay(PulsePlayerStyle.mediaSecondary.opacity(0.45)).accessibilityHidden(true)
+            layout {
+                ForEach(categories, id: \.self) { category in
+                    let cell = stacked ? AnyLayout(HStackLayout(spacing: 8))
+                                       : AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+                    cell {
+                        Text(counts[category, default: 0], format: .number)
+                            .font(.capture(.headline, weight: .semibold)).monospacedDigit()
+                        LocalizedText(category)
+                            .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.mediaSecondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .combine)
                 }
             }
         }
+        .foregroundStyle(PulsePlayerStyle.onDark)
+        .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .pulsePlayerPanel(cornerRadius: 12)
+        .background(PulsePlayerStyle.mediaSurface, in: .rect(cornerRadius: 22))
+        .pulsePlayerKeepControlsTogether()
     }
 
-    private func storageRow(_ file: StoredFile) -> some View {
+    private func storageRow(_ file: StoredFile, measuring: Bool) -> some View {
         HStack(spacing: 12) {
-            Glyph(symbol: file.isDownload ? .download : .feed, size: 18, tint: PulsePlayerStyle.accent)
+            VideoFileThumbnail(url: file.url, isAudio: file.isAudio)
+                .frame(width: 64, height: 48)
+                .clipShape(.rect(cornerRadius: 9))
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 Text(verbatim: file.title).font(.capture(.subheadline, weight: .semibold))
                 LocalizedText(file.category).font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
                 Group {
-                    if let bytes = sizes[file.url] { Text(verbatim: displaySize(bytes)) }
+                    if measuring { Text(verbatim: "…") }
+                    else if let bytes = sizes[file.url] { Text(verbatim: displaySize(bytes)) }
                     else { LocalizedText("Size unavailable") }
                 }
                 .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
@@ -771,7 +783,7 @@ private struct VideoStorageView: View {
     private func removalSheet(_ file: StoredFile) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                SheetHeading(title: file.isDownload ? "Remove offline video?" : "Delete this local copy?") {
+                SheetToolbar(context: file.isDownload ? "Remove offline video?" : "Delete this local copy?", showsConfirmation: true) {
                     removing = nil
                 }
                 Text(verbatim: file.title).font(.capture(.headline))
@@ -860,8 +872,8 @@ private struct VideoStorageView: View {
 struct AllowanceStatusPanel: View {
     var kinds = AllowanceKind.allCases
     var onMedia = false
+    var compact = true
     @Environment(\.locale) private var locale
-    @Environment(\.layoutDirection) private var layoutDirection
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @EnvironmentObject private var api: APIClient
     @EnvironmentObject private var commerce: CommerceStore
@@ -870,7 +882,7 @@ struct AllowanceStatusPanel: View {
 
     private var hasUsage: Bool { quota.usage != nil && quota.error == nil }
     private var canShowDetails: Bool { api.session != nil && hasUsage && !commerce.premium }
-    private var detailsVisible: Bool { canShowDetails && showsUsageDetails }
+    private var detailsVisible: Bool { canShowDetails && (!compact || showsUsageDetails) }
     private var primaryText: Color { onMedia ? PulsePlayerStyle.onDark : PulsePlayerStyle.paper }
     private var secondaryText: Color { onMedia ? PulsePlayerStyle.mediaSecondary : PulsePlayerStyle.secondary }
     private var accent: Color { onMedia ? PulsePlayerStyle.mediaAccent : PulsePlayerStyle.accent }
@@ -878,14 +890,13 @@ struct AllowanceStatusPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            allowanceHeading
             if api.session == nil {
                 LocalizedText("Connect to refresh your allowance.")
                     .font(.capture(.subheadline)).foregroundStyle(secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 if commerce.premium || hasUsage {
-                    statusRows
+                    if compact { balanceSummary } else { detailedAllowance }
                 } else if quota.error == nil {
                     HStack(spacing: 10) {
                         ProgressView().tint(accent).accessibilityHidden(true)
@@ -902,123 +913,112 @@ struct AllowanceStatusPanel: View {
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in quota.resetIfNeeded() }
     }
 
-    @ViewBuilder private var statusRows: some View {
-        let rows = VStack(alignment: .leading, spacing: 0) {
+    private var detailedAllowance: some View {
+        VStack(alignment: .leading, spacing: 12) {
             ForEach(kinds) { kind in
-                if kind != kinds.first { rule }
-                allowanceStatus(kind)
+                let unlimited = commerce.premium || quota.isUnlimited(kind)
+                let remaining = quota.remaining(kind)
+                let total = quota.totalAllowance(for: kind)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Glyph(symbol: kind == .watch ? .play : .download, size: 16, tint: accent)
+                        LocalizedText(kind == .watch ? "Online viewing" : "Offline downloads")
+                            .font(.capture(.subheadline)).foregroundStyle(secondaryText)
+                    }
+                    Group {
+                        if unlimited {
+                            LocalizedText("Unlimited")
+                        } else {
+                            LocalizedText("%@ left · %@ total today", remaining.formatted(.number.locale(locale)),
+                                          total.formatted(.number.locale(locale)))
+                        }
+                    }
+                    .font(.capture(.title3, weight: .semibold)).monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+                    if !unlimited && total > 0 {
+                        ProgressView(value: Double(min(remaining, total)), total: Double(total))
+                            .progressViewStyle(.linear).tint(accent).accessibilityHidden(true)
+                    }
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(PulsePlayerStyle.surface, in: .rect(cornerRadius: 16))
+                .accessibilityElement(children: .combine)
+            }
+            if detailsVisible { AllowanceResetText(tint: secondaryText) }
+        }
+    }
+
+    private var balanceSummary: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if canShowDetails {
+                Button {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                        showsUsageDetails.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 12) {
+                        balances
+                        Glyph(symbol: .back, size: 12, tint: accent)
+                            .environment(\.layoutDirection, .leftToRight)
+                            .rotationEffect(.degrees(showsUsageDetails ? 90 : -90))
+                            .frame(width: 32, height: 32)
+                    }
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityHint(Text(LocalizedStringKey(showsUsageDetails ? "Hide details" : "Usage details")))
+                .accessibilityValue(Text(LocalizedStringKey(showsUsageDetails ? "Expanded" : "Collapsed")))
+                .accessibilityIdentifier("account.usageDetails")
+            } else {
+                balances
             }
             if detailsVisible {
-                rule
-                AllowanceResetText(tint: secondaryText).padding(.vertical, 10)
-            }
-        }
-        .padding(.horizontal, 14)
-        if onMedia {
-            rows.background(PulsePlayerStyle.onDark.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-        } else {
-            rows.pulsePlayerPanel(cornerRadius: 14)
-        }
-    }
-
-    private var rule: some View {
-        Rectangle().fill(onMedia ? PulsePlayerStyle.onDark.opacity(0.14) : PulsePlayerStyle.line)
-            .frame(height: 1).accessibilityHidden(true)
-    }
-
-    @ViewBuilder private var allowanceHeading: some View {
-        let title = LocalizedText(kinds == [.download] ? "Daily limits" : "Online video")
-            .font(.capture(onMedia ? .subheadline : .headline, weight: .semibold))
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityAddTraits(.isHeader)
-
-        if canShowDetails {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) {
-                    title.fixedSize(horizontal: true, vertical: false)
-                    Spacer(minLength: 0)
-                    usageDetailsButton.fixedSize(horizontal: true, vertical: false)
-                }
-                VStack(alignment: .leading, spacing: 0) {
-                    title
-                    usageDetailsButton
-                }
-            }
-        } else {
-            title
-        }
-    }
-
-    private var usageDetailsButton: some View {
-        let down = layoutDirection == .leftToRight ? -90.0 : 90.0
-        return Button {
-            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.20)) {
-                showsUsageDetails.toggle()
-            }
-        } label: {
-            let label = HStack(spacing: 6) {
-                LocalizedText(showsUsageDetails ? "Hide details" : "Usage details")
-                    .font(.capture(.footnote, weight: .semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-                Glyph(symbol: .back, size: 10, tint: accent)
-                    .rotationEffect(.degrees(showsUsageDetails ? -down : down))
-            }
-            .foregroundStyle(accent)
-            .padding(.horizontal, 12)
-            .frame(minWidth: 44, minHeight: 44)
-            .contentShape(.interaction, Capsule())
-            if onMedia {
-                label
-            } else {
-                label.pulsePlayerGlass(in: Capsule(), fallback: PulsePlayerStyle.raised)
-            }
-        }
-        .buttonStyle(PressStyle())
-        .accessibilityIdentifier("account.usageDetails")
-    }
-
-    private func allowanceStatus(_ kind: AllowanceKind) -> some View {
-        let isWatch = kind == .watch
-        let unlimited = commerce.premium || quota.isUnlimited(kind)
-        let remaining = quota.remaining(kind)
-        let available = unlimited || remaining > 0
-        let title = LocalizedText(isWatch ? "Online viewing" : "Offline downloads")
-            .font(.capture(.subheadline, weight: .medium))
-            .foregroundStyle(primaryText)
-            .fixedSize(horizontal: false, vertical: true)
-        let status = LocalizedText(unlimited ? "Unlimited" : (available ? "Available today" : "Daily limit reached"))
-            .font(.capture(.footnote, weight: .medium))
-            .foregroundStyle(available ? accent : errorTint)
-            .fixedSize(horizontal: false, vertical: true)
-
-        return HStack(alignment: .top, spacing: 10) {
-            Glyph(symbol: isWatch ? .play : .download, size: 16, tint: secondaryText)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 5) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        title.fixedSize(horizontal: true, vertical: false)
-                        Spacer(minLength: 0)
-                        status.fixedSize(horizontal: true, vertical: false)
-                    }
-                    VStack(alignment: .leading, spacing: 3) {
-                        title
-                        status
+                ForEach(kinds) { kind in
+                    if !quota.isUnlimited(kind) {
+                        LocalizedText("%@ left · %@ total today", quota.remaining(kind).formatted(.number.locale(locale)),
+                                      quota.totalAllowance(for: kind).formatted(.number.locale(locale)))
+                            .font(.capture(.footnote)).monospacedDigit()
+                            .foregroundStyle(secondaryText)
                     }
                 }
-                if detailsVisible, !unlimited {
-                    LocalizedText("%@ left · %@ total today", remaining.formatted(.number.locale(locale)),
-                                  quota.totalAllowance(for: kind).formatted(.number.locale(locale)))
-                        .font(.capture(.footnote)).monospacedDigit()
-                        .foregroundStyle(secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
+                AllowanceResetText(tint: secondaryText)
+            }
+        }
+        .padding(.vertical, 8)
+        .pulsePlayerKeepControlsTogether()
+    }
+
+    private var balances: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(kinds) { kind in
+                let unlimited = commerce.premium || quota.isUnlimited(kind)
+                let remaining = quota.remaining(kind)
+                let total = quota.totalAllowance(for: kind)
+                if unlimited {
+                    LocalizedText(kind == .watch ? "Online viewing" : "Offline downloads")
+                        .font(.capture(.footnote)).foregroundStyle(secondaryText)
+                    LocalizedText("Unlimited").foregroundStyle(accent)
+                } else {
+                    LocalizedText(kind == .watch ? "%@ views left today" : "%@ downloads left today",
+                                  remaining.formatted(.number.locale(locale)))
+                        .foregroundStyle(remaining == 0 ? errorTint : primaryText)
+                    if total > 0 {
+                        ProgressView(value: Double(min(remaining, total)), total: Double(total))
+                            .progressViewStyle(.linear)
+                            .tint(accent)
+                            .accessibilityHidden(true)
+                    }
                 }
             }
         }
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-        .accessibilityElement(children: .combine)
+        .font(.capture(.subheadline, weight: .semibold)).monospacedDigit()
+        .multilineTextAlignment(.leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
+
 }
 struct AllowanceResetText: View {
     var tint: Color = PulsePlayerStyle.secondary

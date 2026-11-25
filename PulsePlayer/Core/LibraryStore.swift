@@ -50,7 +50,17 @@ final class LibraryStore: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: snapshotURL.path) {
-                snapshot = try JSONDecoder().decode(LessonLibrarySnapshot.self, from: Data(contentsOf: snapshotURL))
+                let saved = try JSONDecoder().decode(LessonLibrarySnapshot.self, from: Data(contentsOf: snapshotURL))
+                var library = saved
+                let sample = Self.retiredSampleID
+                library.movies.removeAll { $0.id == sample }
+                library.favorites.removeAll { $0.localMovieID == sample }
+                library.watchedVideos?.removeAll { $0.clip.localMovieID == sample }
+                snapshot = library
+                if library.movies.count != saved.movies.count || library.favorites.count != saved.favorites.count ||
+                    library.watchedVideos?.count != saved.watchedVideos?.count {
+                    save(library)
+                }
             }
         } catch {
             readable = false
@@ -63,36 +73,10 @@ final class LibraryStore: ObservableObject {
     var favoriteMovies: [PracticeRecording] { movies.filter { $0.isFavorited == true && !$0.isAudio } }
     var folders: [LocalVideoFolder] { snapshot.folders ?? [] }
     var history: [LessonLinkVisit] { snapshot.history }
-    // A bundled lesson uses the same local-file player and editor as an import.
-    // Register it only when opened; removing its library entry leaves the bundled original available.
-    private static let craneID = UUID(uuidString: "96537A05-C53E-4705-A91E-85422DABEAA6")!
-    func url(for movie: PracticeRecording) -> URL {
-        if movie.id == Self.craneID, let url = Bundle.main.url(forResource: "PaperCrane", withExtension: "mp4") {
-            return url
-        }
-        return root.appendingPathComponent(movie.filename)
-    }
+    // Only this local identity belonged to the retired built-in video. Imports and exports have independent IDs.
+    nonisolated static let retiredSampleID = UUID(uuidString: "96537A05-C53E-4705-A91E-85422DABEAA6")!
 
-    func paperCraneRoute(startingAt chapter: CraneChapter? = nil) throws -> PlayerRoute {
-        guard let source = Bundle.main.url(forResource: "PaperCrane", withExtension: "mp4"),
-              FileManager.default.isReadableFile(atPath: source.path) else { throw PulsePlayerError.unsupportedMedia }
-        let recording: PracticeRecording
-        if let existing = movies.first(where: { $0.id == Self.craneID }) {
-            recording = existing
-        } else {
-            recording = PracticeRecording(id: Self.craneID, filename: source.lastPathComponent,
-                                          title: L10n.text("Paper crane"), date: Date(), isExport: false)
-            var next = snapshot
-            next.movies.insert(recording, at: 0)
-            try persist(next)
-        }
-        guard let route = PlayerRoute.localMovies([recording], selected: recording, library: self) else {
-            throw PulsePlayerError.unsupportedMedia
-        }
-        guard let clip = route.clips.first else { throw PulsePlayerError.unsupportedMedia }
-        try FoldPracticeStore.shared.openCraneGuide(for: clip, chapter: chapter)
-        return route
-    }
+    func url(for movie: PracticeRecording) -> URL { root.appendingPathComponent(movie.filename) }
 
     func movies(in folder: LocalVideoFolder) -> [PracticeRecording] {
         movies.filter { $0.folderID == folder.id }
@@ -203,8 +187,7 @@ final class LibraryStore: ObservableObject {
         try persist(next)
     }
     // Internal IDs stay stable; only the user-facing shared copy gets a readable name.
-    func shareFile(for movie: PracticeRecording, commerce: CommerceStore) async throws -> URL {
-        let authorization = try commerce.requireMediaExport()
+    func shareFile(for movie: PracticeRecording) async throws -> URL {
         let source = url(for: movie)
         let title = movie.title
         let task = Task.detached(priority: .userInitiated) {
@@ -240,7 +223,6 @@ final class LibraryStore: ObservableObject {
         } onCancel: { task.cancel() }
         do {
             try Task.checkCancellation()
-            try commerce.requireMediaExport(authorization)
             return destination
         } catch {
             try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
@@ -292,16 +274,12 @@ final class LibraryStore: ObservableObject {
         try await storeMovie(source, exported: false, title: title, folderID: folderID)
     }
 
-    func saveExport(_ source: URL, title: String, authorization: MediaExportAuthorization,
-                    commerce: CommerceStore) async throws -> PracticeRecording {
-        try commerce.requireMediaExport(authorization)
-        return try await storeMovie(source, exported: true, title: title, folderID: nil) {
-            _ = try commerce.requireMediaExport(authorization)
-        }
+    func saveExport(_ source: URL, title: String, beforeCommit: (@MainActor () throws -> Void)? = nil) async throws -> PracticeRecording {
+        try await storeMovie(source, exported: true, title: title, folderID: nil, beforeCommit: beforeCommit)
     }
 
     private func storeMovie(_ source: URL, exported: Bool, title: String?, folderID: UUID?,
-                            beforeCommit: (() throws -> Void)? = nil) async throws -> PracticeRecording {
+                            beforeCommit: (@MainActor () throws -> Void)? = nil) async throws -> PracticeRecording {
         guard readable else { throw PulsePlayerError.storage }
         let id = UUID()
         let ext = source.pathExtension.lowercased().nilIfBlank ?? "mov"
@@ -345,7 +323,7 @@ final class LibraryStore: ObservableObject {
         do {
             try persist(next)
             let file = url(for: movie)
-            if movie.id != Self.craneID, FileManager.default.fileExists(atPath: file.path) {
+            if FileManager.default.fileExists(atPath: file.path) {
                 try FileManager.default.removeItem(at: file)
             }
         } catch { self.error = error.localizedDescription }

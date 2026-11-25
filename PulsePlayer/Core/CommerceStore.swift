@@ -23,11 +23,6 @@ private struct PurchaseRecord: Codable {
     var failure: PurchaseFailure?
 }
 
-struct MediaExportAuthorization: Sendable {
-    let owner: String
-    fileprivate let environment: String
-}
-
 @MainActor
 final class CommerceStore: NSObject, ObservableObject {
     @Published private(set) var products: [SKProduct] = []
@@ -70,22 +65,10 @@ final class CommerceStore: NSObject, ObservableObject {
         rightsVerified && ownerID != nil && ownerID == api.session?.userId.value
     }
     var hasVerifiedPlus: Bool { verifiedCurrentAccount && premium }
-    var canExportMedia: Bool { hasVerifiedPlus }
     var canRetryPurchaseConfirmation: Bool {
         purchaseAccessNeedsRefresh || SKPaymentQueue.default().transactions.contains {
             $0.transactionState == .purchased || $0.transactionState == .restored
         }
-    }
-    @discardableResult
-    func requireMediaExport(_ expected: MediaExportAuthorization? = nil) throws -> MediaExportAuthorization {
-        if let expected, expected.owner != api.session?.userId.value || expected.environment != api.configuration.storageNamespace {
-            throw PulsePlayerError.unauthorized
-        }
-        guard verifiedCurrentAccount, let owner = api.session?.userId.value else {
-            throw PulsePlayerError.service("Connect to verify your Plus membership before exporting.")
-        }
-        guard premium else { throw PulsePlayerError.service("Export is included with Plus.") }
-        return MediaExportAuthorization(owner: owner, environment: api.configuration.storageNamespace)
     }
 
     init(api: APIClient, quota: QuotaStore) {

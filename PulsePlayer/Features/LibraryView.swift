@@ -4,19 +4,18 @@ import AVFoundation
 struct LibraryView: View {
     @EnvironmentObject private var api: APIClient
     @ObservedObject private var practice = FoldPracticeStore.shared
-    @State private var showingNotebook = false
-    @State private var lastFileCollection = Category.imports
-    @State private var choosingFileCollection = false
+    @State private var showsShortcuts = false
     @FocusState private var findingFold: Bool
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var offline: OfflineStore
-    @EnvironmentObject private var commerce: CommerceStore
+    @Environment(\.locale) private var locale
     @ObservedObject private var localPlayback = LocalPlaybackResume.shared
-    @State private var showingExportMembership = false
     var edit: (PracticeRecording) -> Void
     var browseVideos: () -> Void
     var openEditor: () -> Void
+    let openSearch: () -> Void
     let openTools: () -> Void
+    let openNotebook: () -> Void
     let openPlus: () -> Void
     let openHistory: () -> Void
     @Binding var filter: String
@@ -34,6 +33,9 @@ struct LibraryView: View {
     @State private var folderName = ""
     @State private var folderError: String?
     @Environment(\.dynamicTypeSize) private var typeSize
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var collectionSelection
 
     private static let foldCollection = "Fold notes"
     private var showsFolds: Bool { filter == Self.foldCollection }
@@ -56,6 +58,10 @@ struct LibraryView: View {
         case move(PracticeRecording)
         case delete(LocalVideoFolder)
 
+        var isDeletion: Bool {
+            if case .delete = self { return true }
+            return false
+        }
         var id: String { title }
         var title: String {
             switch self {
@@ -82,22 +88,22 @@ struct LibraryView: View {
             case .imports, .folders, .exports: rawValue
             }
         }
+        var symbol: PulsePlayerGlyph {
+            switch self {
+            case .imports: .feed
+            case .folders: .folder
+            case .offline: .download
+            case .exports: .edit
+            case .saved: .bookmark
+            }
+        }
         var emptyTitle: String {
             switch self {
             case .saved: "No favorites yet"
             case .offline: "No offline videos yet"
-            case .imports: "Import a video"
+            case .imports: "No imported videos yet"
             case .folders: "No folders yet"
             case .exports: "No exports yet"
-            }
-        }
-        var emptyMessage: String? {
-            switch self {
-            case .saved: "Save a video while watching to find it here."
-            case .offline: "Download a video to watch it without a connection."
-            case .imports: "Your original stays untouched."
-            case .folders: nil
-            case .exports: "Videos and audio you export from the editor appear here."
             }
         }
         var opensOnlineVideos: Bool { self == .saved || self == .offline }
@@ -112,16 +118,25 @@ struct LibraryView: View {
     }
 
     private var presentingContent: Bool {
-        findingFold || showingNotebook || showingExportMembership || player != nil || folderAction != nil || sharing != nil
+        findingFold || player != nil || folderAction != nil || sharing != nil
             || removing != nil || removingDownload != nil || selectedFolderID != nil
     }
 
     var body: some View {
         ScenePage(scrollsBehindTabBar: true) { container in
             let width = min(640, PulsePlayerStyle.pageContentWidth(in: container))
-            VStack(alignment: .leading, spacing: 18) {
-                libraryHeader
-                libraryNavigation
+            let bounds = CGRect(origin: .zero, size: container.size)
+            let stacked = width < 310 || typeSize.isAccessibilitySize || PulsePlayerStyle.intersectsReservedRegion(bounds, in: container)
+            let entries = practiceEntries
+            VStack(alignment: .leading, spacing: 12) {
+                let tools = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+                                    : AnyLayout(HStackLayout(spacing: 8))
+                tools {
+                    collectionRail(sessionCount: entries.count)
+                    shortcutToggle
+                }
+                .pulsePlayerKeepControlsTogether()
+                if showsShortcuts { shortcuts(stacked: stacked) }
                 if showsFolds {
                     if let message = practice.error {
                         ErrorNote(message: message)
@@ -130,35 +145,30 @@ struct LibraryView: View {
                         }
                     }
                     if !practice.needsLoadRetry {
-                        FoldLibraryIndex(entries: practiceEntries, searchFocused: $findingFold,
-                                         play: openFold, notebook: { showingNotebook = true },
-                                         startLesson: startCraneLesson)
+                        FoldLibraryIndex(entries: entries, searchFocused: $findingFold, stacked: stacked,
+                                         play: openFold, openSearch: openSearch,
+                                         openImports: { filter = Category.imports.rawValue })
                     }
                 } else {
-                    workbenchActions
-                    libraryContents(in: container, width: width)
+                    librarySection(stackedRows: stacked)
                 }
             }
         }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: presentingContent, initial: true) { _, value in engaged = value }
-            .sheet(isPresented: $showingNotebook) { FoldNotebookView() }
             .onChange(of: filter) { _, value in
                 expandedMovieActionsID = nil
-                choosingFileCollection = false
                 findingFold = false
-                if let collection = Category(rawValue: value) { lastFileCollection = collection }
                 if value != Category.folders.rawValue { selectedFolderID = nil }
             }
             .onChange(of: library.listRequest) { _, _ in expandedMovieActionsID = nil }
             .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
-            .fullScreenCover(isPresented: $showingExportMembership) { MembershipView(entry: .media) }
             .fullScreenCover(item: $player) { PlayerScreen(route: $0) }
             .sheet(item: $folderAction) { action in folderSheet(action) }
             .sheet(item: $removingDownload) { video in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        SheetHeading(title: "Remove offline video?") { removingDownload = nil }
+                        SheetToolbar(context: "Remove offline video?", showsConfirmation: true) { removingDownload = nil }
                         Text(verbatim: video.clip.title).font(.capture(.headline)).lineLimit(3)
                         LocalizedText("This removes the download from this device.")
                             .foregroundStyle(PulsePlayerStyle.secondary)
@@ -172,7 +182,7 @@ struct LibraryView: View {
             .sheet(item: $removing) { movie in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
-                        SheetHeading(title: "Delete this local copy?") { removing = nil }
+                        SheetToolbar(context: "Delete this local copy?", showsConfirmation: true) { removing = nil }
                         Text(verbatim: movie.displayFilename).font(.capture(.headline))
                         LocalizedText("This deletes the selected copy from your PulsePlayer library.")
                             .foregroundStyle(PulsePlayerStyle.secondary)
@@ -183,50 +193,126 @@ struct LibraryView: View {
             }
     }
 
-    private var libraryHeader: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 10) {
-                SceneTitle("Library", size: 32).fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 0)
-                PlusEntryButton(action: openPlus)
-            }
-            VStack(alignment: .leading) {
-                SceneTitle("Library", size: 32)
-                PlusEntryButton(action: openPlus)
-            }
-        }
-    }
-
-    private var libraryNavigation: some View {
-        let choices = Group {
-            libraryTab("Marked folds", active: showsFolds) {
-                if !showsFolds { lastFileCollection = category }
-                filter = Self.foldCollection
-            }
-            libraryTab("Video files", active: !showsFolds) {
-                if showsFolds { filter = lastFileCollection.rawValue }
-            }
-        }
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 4) { choices }.fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: 2) { choices }
-        }
-        .padding(3)
-        .pulsePlayerGlass(in: .rect(cornerRadius: 14))
-        .pulsePlayerKeepControlsTogether()
-    }
-
-    private func libraryTab(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            LocalizedText(title)
-                .font(.capture(.subheadline, weight: active ? .bold : .regular))
-                .foregroundStyle(active ? PulsePlayerStyle.accent : PulsePlayerStyle.paper)
-                .padding(.horizontal, 12).frame(minHeight: 44)
-                .background(active ? PulsePlayerStyle.mist : .clear, in: .rect(cornerRadius: 11))
-                .contentShape(Rectangle())
+    private var shortcutToggle: some View {
+        Button {
+            findingFold = false
+            showsShortcuts.toggle()
+        } label: {
+            TintedArtwork(name: "PlayerMore", tint: PulsePlayerStyle.accent)
+                .frame(width: 18, height: 18)
+                .frame(width: 44, height: 44)
+                .pulsePlayerGlass(in: Circle(), tint: showsShortcuts ? PulsePlayerStyle.accent.opacity(0.14) : nil)
+                .contentShape(Circle())
         }
         .buttonStyle(PressStyle())
-        .accessibilityAddTraits(active ? .isSelected : [])
+        .accessibilityLabel(Text("Shortcuts"))
+        .accessibilityValue(Text(LocalizedStringKey(showsShortcuts ? "Expanded" : "Collapsed")))
+        .disabled(importing)
+    }
+
+    private func shortcuts(stacked: Bool) -> some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 14), count: stacked ? 1 : 2)
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: 2) {
+            shortcut("Practice notebook", symbol: .fold, action: openNotebook)
+            shortcut("Recently opened", symbol: .play, action: openHistory)
+                .accessibilityIdentifier("library.history")
+            shortcut("Editing tools", symbol: .edit, action: openTools)
+                .accessibilityIdentifier("library.tools")
+            shortcut("PulsePlayer Plus", symbol: .pass, action: openPlus)
+                .accessibilityIdentifier("membership.tabEntry")
+        }
+        .padding(.horizontal, 14).padding(.vertical, 6)
+        .pulsePlayerGlass(in: .rect(cornerRadius: 18), interactive: false)
+        .pulsePlayerKeepControlsTogether()
+        .disabled(importing)
+    }
+
+    private func shortcut(_ title: String, symbol: PulsePlayerGlyph, action: @escaping () -> Void) -> some View {
+        Button {
+            showsShortcuts = false
+            action()
+        } label: {
+            HStack(spacing: 9) {
+                MenuGlyph(symbol: symbol, tint: PulsePlayerStyle.accent)
+                LocalizedText(title)
+                    .font(.capture(.subheadline, weight: .medium))
+                    .multilineTextAlignment(.leading)
+            }
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+    }
+
+    private func collectionRail(sessionCount: Int) -> some View {
+        Group {
+            if typeSize.isAccessibilitySize {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 154), alignment: .topLeading)], alignment: .leading, spacing: 10) {
+                    collectionTabs(sessionCount: sessionCount)
+                }
+            } else {
+                ScrollViewReader { rail in
+                    ScrollView(.horizontal) {
+                        HStack(alignment: .bottom, spacing: 16) {
+                            collectionTabs(sessionCount: sessionCount)
+                        }
+                        .padding(.horizontal, 2)
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: filter)
+                    }
+                    .scrollIndicators(.hidden)
+                    .onChange(of: filter, initial: true) { _, selection in rail.scrollTo(selection) }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("Collections"))
+        .disabled(importing)
+    }
+
+    @ViewBuilder private func collectionTabs(sessionCount: Int) -> some View {
+        collectionTab(Self.foldCollection, title: "Marked folds", symbol: .fold, total: sessionCount)
+        ForEach(Category.allCases) { collection in
+            collectionTab(collection.rawValue, title: collection.title, symbol: collection.symbol, total: count(in: collection))
+        }
+    }
+
+    private func collectionTab(_ id: String, title: String, symbol: PulsePlayerGlyph, total: Int) -> some View {
+        let selected = filter == id
+        let tint = selected ? PulsePlayerStyle.accent : PulsePlayerStyle.secondary
+        return Button {
+            showsShortcuts = false
+            filter = id
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Glyph(symbol: symbol, size: 17, tint: tint)
+                    if total > 0 {
+                        Text(total, format: .number)
+                            .font(.capture(.caption, weight: .medium)).monospacedDigit()
+                    }
+                }
+                LocalizedText(title)
+                    .font(.capture(.subheadline, weight: selected ? .bold : .medium))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .multilineTextAlignment(.leading)
+            .foregroundStyle(tint)
+            .padding(.vertical, 7)
+            .frame(minWidth: 44, minHeight: 52, alignment: .leading)
+            .overlay(alignment: .bottomLeading) {
+                if selected {
+                    Capsule().fill(PulsePlayerStyle.accent).frame(width: 26, height: 3)
+                        .matchedGeometryEffect(id: "collection-indicator", in: collectionSelection)
+                        .accessibilityHidden(true)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+        .accessibilityLabel(Text(LocalizedStringKey(title)))
+        .accessibilityValue(total > 0 ? Text(total, format: .number) : Text(verbatim: ""))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .id(id)
     }
 
     private func openFold(_ id: FoldPracticeID, stepID: UUID) {
@@ -242,90 +328,6 @@ struct LibraryView: View {
             findingFold = false
             player = route
         } catch { library.error = error.localizedDescription }
-    }
-
-    private func startCraneLesson() {
-        do {
-            player = try library.paperCraneRoute()
-        } catch { library.error = error.localizedDescription }
-    }
-
-    private var workbenchActions: some View {
-        let buttons = Group {
-            Button { openTools() } label: {
-                HStack {
-                    Glyph(symbol: .edit, size: 16, tint: PulsePlayerStyle.accent)
-                    LocalizedText("Editing tools")
-                }
-            }
-            .accessibilityIdentifier("library.tools")
-            Button(action: openHistory) {
-                LocalizedText("Recently opened")
-            }
-            .accessibilityIdentifier("library.history")
-        }
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) { buttons }.fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: 5) { buttons }
-        }
-        .buttonStyle(LibraryActionStyle()).disabled(importing)
-    }
-
-    private func libraryContents(in container: GeometryProxy, width: CGFloat) -> some View {
-        let bounds = CGRect(origin: .zero, size: container.size)
-        let divided = PulsePlayerStyle.intersectsReservedRegion(bounds, in: container)
-        let showsCollections = width >= 540 && typeSize <= .xLarge && !divided
-        let gridItem = typeSize.isAccessibilitySize || divided ? GridItem(.flexible()) : GridItem(.adaptive(minimum: 140))
-        return VStack(alignment: .leading, spacing: 12) {
-            if !showsCollections {
-                Button { choosingFileCollection.toggle() } label: {
-                    HStack(spacing: 10) {
-                        LocalizedText(category.title).font(.capture(.headline, weight: .semibold))
-                        Text(count(in: category), format: .number)
-                            .font(.capture(.footnote)).monospacedDigit().foregroundStyle(PulsePlayerStyle.secondary)
-                        Spacer(minLength: 0)
-                        LocalizedText("Collections").font(.capture(.footnote, weight: .medium))
-                            .foregroundStyle(PulsePlayerStyle.accent)
-                        Glyph(symbol: .back, size: 10, tint: PulsePlayerStyle.accent)
-                            .environment(\.layoutDirection, .leftToRight)
-                            .rotationEffect(.degrees(choosingFileCollection ? 90 : -90))
-                    }
-                    .padding(.horizontal, 14).padding(.vertical, 4)
-                    .frame(minHeight: 48)
-                    .pulsePlayerGlass(in: .rect(cornerRadius: 12))
-                }
-                .buttonStyle(PressStyle())
-                .accessibilityHint("Choose a library collection")
-                .pulsePlayerKeepControlsTogether()
-            }
-            if showsCollections || choosingFileCollection {
-                LazyVGrid(columns: [gridItem], spacing: 3) {
-                    ForEach(Category.allCases) { entry in
-                        Button {
-                            filter = entry.rawValue
-                            choosingFileCollection = false
-                        } label: {
-                            HStack(spacing: 6) {
-                                LocalizedText(entry.title).font(.capture(.subheadline, weight: .medium))
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Spacer(minLength: 2)
-                                Text(count(in: entry), format: .number).monospacedDigit().font(.capture(.caption))
-                            }
-                            .padding(.horizontal, 10).frame(minHeight: 44)
-                            .foregroundStyle(entry == category ? PulsePlayerStyle.accent : PulsePlayerStyle.paper)
-                            .background(entry == category ? PulsePlayerStyle.mist : .clear, in: .rect(cornerRadius: 8))
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(PressStyle())
-                        .accessibilityAddTraits(entry == category ? .isSelected : [])
-                        .pulsePlayerKeepControlsTogether()
-                    }
-                }
-                Divider()
-            }
-            librarySection(stackedRows: width < 310 || typeSize.isAccessibilitySize || divided)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
 
     private func librarySection(stackedRows: Bool) -> some View {
@@ -360,16 +362,36 @@ struct LibraryView: View {
     }
 
     private func sectionIntro(empty: Bool, stacked: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if empty {
-                EmptyStateScene(title: category.emptyTitle, message: category.emptyMessage)
-            }
+        VStack(alignment: .leading, spacing: 14) {
             if category == .imports {
                 VideoImportActions(onImported: { playMovie($0, playlist: [$0]) }, importing: $importing,
-                                   presentation: .library(stacked: stacked))
+                                   presentation: .sources(stacked: stacked))
+                if empty {
+                    EmptyStateScene(appearance: .inline(.library), title: category.emptyTitle)
+                }
             } else if category.opensOnlineVideos {
-                EmptyStateAction(title: "Browse videos", symbol: .play, primary: true, action: browseVideos)
+                VStack(spacing: 10) {
+                    Glyph(symbol: category.symbol, size: 34, tint: PulsePlayerStyle.accent)
+                    LocalizedText(category.emptyTitle)
+                        .font(.capture(.headline, weight: .semibold))
+                        .multilineTextAlignment(.center)
+                    Button(action: browseVideos) {
+                        HStack(spacing: 8) {
+                            Glyph(symbol: .play, size: 13, tint: PulsePlayerStyle.accent)
+                            LocalizedText("Browse videos").font(.capture(.subheadline, weight: .semibold))
+                        }
+                        .padding(.horizontal, 16).frame(minHeight: 44)
+                        .foregroundStyle(PulsePlayerStyle.accent)
+                        .pulsePlayerGlass(in: Capsule(), fallback: PulsePlayerStyle.surface)
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(PressStyle())
+                }
+                .padding(.vertical, 22)
+                .frame(maxWidth: .infinity)
+                .pulsePlayerKeepControlsTogether()
             } else {
+                EmptyStateScene(appearance: .screening(.edit), title: category.emptyTitle)
                 EmptyStateAction(title: "Edit a video", symbol: .edit, primary: true, action: openEditor)
             }
         }
@@ -390,16 +412,13 @@ struct LibraryView: View {
         if let folder = selectedFolder {
             let movies = library.movies(in: folder)
             VStack(alignment: .leading, spacing: 12) {
-                Button { selectedFolderID = nil } label: {
-                    HStack(spacing: 8) {
-                        Glyph(symbol: .back, size: 12, tint: PulsePlayerStyle.accent)
-                        LocalizedText("Folders")
-                    }
-                }.buttonStyle(LibraryActionStyle())
-
-                Text(verbatim: folder.name).font(.capture(.title2, weight: .semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityAddTraits(.isHeader)
+                HStack(spacing: 10) {
+                    IconButton(symbol: .back, label: "Folders", glass: true) { selectedFolderID = nil }
+                    Text(verbatim: folder.name)
+                        .font(.capture(.subheadline, weight: .medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .pulsePlayerKeepControlsTogether()
 
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 8) { folderManagementButtons(folder) }
@@ -408,8 +427,10 @@ struct LibraryView: View {
                 }.disabled(importing)
 
                 VideoImportActions(onImported: { _ in }, importing: $importing,
-                                   presentation: .library(stacked: stackedRows), folderID: folder.id)
-                if movies.isEmpty { EmptyStateScene(title: "No videos in this folder yet") }
+                                   presentation: .sources(stacked: stackedRows), folderID: folder.id)
+                if movies.isEmpty && library.error == nil {
+                    EmptyStateScene(appearance: .inline(.folder), title: "No videos in this folder yet")
+                }
                 LazyVStack(spacing: 0) {
                     ForEach(movies) { movie in movieRow(movie, stacked: stackedRows, playlist: movies) }
                 }
@@ -419,7 +440,9 @@ struct LibraryView: View {
                 ActionButton(title: "New folder") { presentFolderAction(.create(moving: nil)) }
                     .disabled(importing)
                     .accessibilityIdentifier("library.folders.create")
-                if library.folders.isEmpty { EmptyStateScene(title: Category.folders.emptyTitle) }
+                if library.folders.isEmpty && library.error == nil {
+                    EmptyStateScene(appearance: .shelf(.folder), title: Category.folders.emptyTitle)
+                }
                 LazyVStack(spacing: 0) {
                     ForEach(library.folders, content: folderRow)
                 }
@@ -467,7 +490,7 @@ struct LibraryView: View {
 
     private func folderSheet(_ action: FolderAction) -> some View {
         VStack(spacing: 0) {
-            SheetHeading(title: action.title) { folderAction = nil }
+            SheetToolbar(context: action.title, showsConfirmation: action.isDeletion) { folderAction = nil }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     switch action {
@@ -521,6 +544,9 @@ struct LibraryView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(verbatim: movie.displayFilename).font(.capture(.headline))
                 .fixedSize(horizontal: false, vertical: true)
+            if library.folders.isEmpty && library.error == nil {
+                EmptyStateScene(appearance: .inline(.folder), title: "No folders yet")
+            }
             if movie.folderID != nil {
                 ActionButton(title: "Remove from folder", primary: false) {
                     commitFolderChange { try library.moveMovie(movie.id, to: nil) }
@@ -531,7 +557,7 @@ struct LibraryView: View {
                     commitFolderChange { try library.moveMovie(movie.id, to: folder.id) }
                 } label: {
                     HStack(spacing: 12) {
-                        Glyph(symbol: .folder, size: 18, tint: PulsePlayerStyle.accent)
+                        MenuGlyph(symbol: .folder, tint: PulsePlayerStyle.accent)
                         Text(verbatim: folder.name).font(.capture(.subheadline, weight: .semibold))
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -728,8 +754,9 @@ struct LibraryView: View {
                 .disabled(importing)
             }
             if showingActions {
-                Rectangle().fill(PulsePlayerStyle.line).frame(height: 1).accessibilityHidden(true)
                 movieActions(movie, stacked: stacked, favoriteRow: favoriteRow)
+                    .padding(6)
+                    .pulsePlayerGlass(in: .rect(cornerRadius: 16), fallback: PulsePlayerStyle.surface, interactive: false)
                     .disabled(importing)
             }
         }
@@ -760,20 +787,22 @@ struct LibraryView: View {
                     expandedMovieActionsID = nil
                     shareMovie(movie)
                 }
+                .buttonStyle(LibraryMovieActionStyle(symbol: .link))
                 .disabled(sharingMovieID != nil)
                 if favoriteRow {
                     Button("Remove from favorites") {
                         expandedMovieActionsID = nil
                         if library.isLocalSaved(movie.id) { library.toggleLocalFavorite(movie.id) }
                     }
+                    .buttonStyle(LibraryMovieActionStyle(symbol: .bookmark))
                 } else {
                     Button("Delete local file", role: .destructive) {
                         expandedMovieActionsID = nil
                         removing = movie
                     }
+                    .buttonStyle(LibraryMovieActionStyle(symbol: .close))
                 }
             }
-            .buttonStyle(LibraryMovieActionStyle())
         }
     }
 
@@ -795,14 +824,10 @@ struct LibraryView: View {
     }
 
     private func shareMovie(_ movie: PracticeRecording) {
-        guard commerce.canExportMedia else {
-            showingExportMembership = true
-            return
-        }
         sharingMovieID = movie.id
         Task {
             defer { sharingMovieID = nil }
-            do { sharing = SharedFile(url: try await library.shareFile(for: movie, commerce: commerce)) }
+            do { sharing = SharedFile(url: try await library.shareFile(for: movie)) }
             catch { library.error = error.localizedDescription }
         }
     }
@@ -811,9 +836,11 @@ struct LibraryView: View {
 private struct FoldLibraryIndex: View {
     let entries: [FoldPracticeEntry]
     @FocusState.Binding var searchFocused: Bool
+    let stacked: Bool
     let play: (FoldPracticeID, UUID) -> Void
-    let notebook: () -> Void
-    let startLesson: () -> Void
+    let openSearch: () -> Void
+    let openImports: () -> Void
+    @State private var showsSearch = false
     @Environment(\.locale) private var locale
     @State private var query = ""
     @State private var status = Status.all
@@ -881,14 +908,36 @@ private struct FoldLibraryIndex: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if entries.isEmpty {
-                EmptyStateScene(title: "No folds marked yet", message: "Open a lesson and mark a fold to keep its place here.")
-                ActionButton(title: "Play the crane lesson", action: startLesson)
+                VStack(alignment: .leading, spacing: 12) {
+                    EmptyStateScene(appearance: .notebook, title: "No folds marked yet", message: "Mark a fold in a video to return to it here.")
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 12) { emptyActions }.fixedSize(horizontal: true, vertical: false)
+                        VStack(alignment: .leading, spacing: 2) { emptyActions }
+                    }
+                }
+                .padding(.vertical, 28)
+                .pulsePlayerKeepControlsTogether()
             } else {
-                searchField
-                statusFilter
+                let controls = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+                                       : AnyLayout(HStackLayout(spacing: 8))
+                controls {
+                    statusFilter
+                    IconButton(symbol: showsSearch ? .close : .search, label: showsSearch ? "Close search" : "Find a video or fold",
+                               selected: showsSearch, glass: true) {
+                        if showsSearch {
+                            query = ""
+                            searchFocused = false
+                        }
+                        showsSearch.toggle()
+                    }
+                }
+                .pulsePlayerKeepControlsTogether()
+                if showsSearch {
+                    searchField.onAppear { searchFocused = true }
+                }
                 let matches = results
                 if matches.isEmpty {
-                    EmptyStateScene(title: searching ? "No matching folds" : status.emptyTitle)
+                    EmptyStateScene(appearance: .inline(searching ? .search : .fold), title: searching ? "No matching folds" : status.emptyTitle)
                     Button {
                         query = ""
                         status = .all
@@ -898,23 +947,39 @@ private struct FoldLibraryIndex: View {
                 } else {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(matches) { group in
-                            lesson(group)
-                            Divider()
+                            VStack(alignment: .leading, spacing: 0) {
+                                lesson(group)
+                            }
+                            .padding(.horizontal, 14).padding(.vertical, 10)
+                            .background(PulsePlayerStyle.surface, in: .rect(cornerRadius: 18))
                         }
                     }
                 }
             }
-            EmptyStateAction(title: "Practice notebook", symbol: .fold, primary: false) {
-                searchFocused = false
-                notebook()
-            }
         }
+    }
+
+    @ViewBuilder private var emptyActions: some View {
+        Button(action: openSearch) {
+            HStack(spacing: 8) {
+                Glyph(symbol: .search, size: 15, tint: PulsePlayerStyle.accent)
+                LocalizedText("Find a video")
+            }
+            .font(.capture(.subheadline, weight: .semibold))
+            .foregroundStyle(PulsePlayerStyle.accent).padding(.horizontal, 16).frame(minHeight: 44)
+            .pulsePlayerGlass(in: Capsule(), tint: PulsePlayerStyle.accent.opacity(0.10), fallback: PulsePlayerStyle.mist)
+        }.buttonStyle(PressStyle())
+        Button(action: openImports) {
+            LocalizedText("Import a video")
+                .font(.capture(.subheadline, weight: .medium))
+                .foregroundStyle(PulsePlayerStyle.accent).padding(.horizontal, 8).frame(minHeight: 44)
+        }.buttonStyle(PressStyle())
     }
 
     private var searchField: some View {
         HStack(spacing: 8) {
             Glyph(symbol: .search, size: 16, tint: PulsePlayerStyle.secondary).accessibilityHidden(true)
-            TextField("Find a lesson or fold", text: $query)
+            TextField("Find a video or fold", text: $query)
                 .textFieldStyle(.plain).autocorrectionDisabled().textInputAutocapitalization(.never)
                 .focused($searchFocused).submitLabel(.search).onSubmit { searchFocused = false }
                 .accessibilityIdentifier("library.findFold")
@@ -923,31 +988,18 @@ private struct FoldLibraryIndex: View {
             }
         }
         .padding(.horizontal, 12)
-        .frame(minHeight: 48)
+        .frame(minHeight: 44)
         .pulsePlayerGlass(in: .rect(cornerRadius: 12))
-        .pulsePlayerKeepControlsTogether()
     }
 
     private var statusFilter: some View {
-        let choices = ForEach(Status.allCases, id: \.self) { choice in
-            Button {
-                status = choice
-                searchFocused = false
-            } label: {
-                LocalizedText(choice.rawValue)
-                    .font(.capture(.footnote, weight: choice == status ? .bold : .regular))
-                    .foregroundStyle(choice == status ? PulsePlayerStyle.accent : PulsePlayerStyle.secondary)
-                    .padding(.horizontal, 8).frame(minHeight: 44)
-                    .background(choice == status ? PulsePlayerStyle.mist : .clear, in: .rect(cornerRadius: 8))
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(PressStyle())
-            .accessibilityAddTraits(choice == status ? .isSelected : [])
+        ChoiceStrip(values: Status.allCases.map(\.rawValue), selected: status.rawValue,
+                    title: { $0 == Status.all.rawValue ? "All" : $0 }) { value in
+            guard let choice = Status(rawValue: value) else { return }
+            status = choice
+            searchFocused = false
         }
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 2) { choices }.fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: 0) { choices }
-        }.pulsePlayerKeepControlsTogether()
+        .accessibilityLabel(Text("Filter sessions"))
     }
 
     @ViewBuilder private func lesson(_ group: Matches) -> some View {
@@ -957,48 +1009,46 @@ private struct FoldLibraryIndex: View {
             Text(verbatim: entry.clip.title)
                 .font(.capture(.headline, weight: .semibold)).accessibilityAddTraits(.isHeader)
         } else {
-            Button {
-                expanded = isOpen ? nil : entry.id
-            } label: {
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(verbatim: entry.clip.title).font(.capture(.headline, weight: .semibold))
-                        if entry.finishedAt != nil {
-                            LocalizedText("Completed")
-                                .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                        } else {
-                            LocalizedText("Fold %@ of %@", String(entry.currentStepNumber), String(entry.steps.count))
-                                .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                        }
-                    }.fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 4)
+            HStack(alignment: .center, spacing: 8) {
+                if let step = entry.currentStep {
+                    Button { play(entry.id, step.id) } label: { lessonLabel(entry) }
+                        .buttonStyle(PressStyle())
+                        .accessibilityHint(Text(verbatim: L10n.format(
+                            entry.finishedAt == nil ? "Resume at %@" : "Review from %@",
+                            [durationLabel(step.start)], language: AppLanguage.from(locale))))
+                } else {
+                    lessonLabel(entry)
+                }
+                Button {
+                    expanded = isOpen ? nil : entry.id
+                } label: {
                     Glyph(symbol: .back, size: 12, tint: PulsePlayerStyle.accent)
                         .environment(\.layoutDirection, .leftToRight)
-                        .rotationEffect(.degrees(isOpen ? 90 : -90)).accessibilityHidden(true)
+                        .rotationEffect(.degrees(isOpen ? 90 : -90))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
-                .frame(minHeight: 48).contentShape(Rectangle())
+                .buttonStyle(PressStyle())
+                .accessibilityLabel(isOpen ? Text("Hide marked folds") : Text("Show marked folds"))
+                .accessibilityValue(Text(verbatim: entry.clip.title))
             }
-            .buttonStyle(PressStyle()).multilineTextAlignment(.leading)
-            .accessibilityHint(isOpen ? Text("Hide marked folds") : Text("Show marked folds"))
+            .pulsePlayerKeepControlsTogether()
         }
 
         if isOpen {
+            Divider().padding(.vertical, 8)
             ForEach(group.marks) { mark in
                 Button { play(entry.id, mark.id) } label: {
                     HStack(alignment: .center, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            if let name = mark.name {
-                                Text(verbatim: name).font(.capture(.body, weight: .medium))
-                                Text(verbatim: mark.numberLabel)
-                                    .font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
-                            } else {
-                                Text(verbatim: mark.numberLabel).font(.capture(.body, weight: .medium))
-                            }
-                        }.fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 2)
                         Text(verbatim: durationLabel(mark.step.start))
-                            .font(.capture(.footnote)).monospacedDigit().foregroundStyle(PulsePlayerStyle.secondary)
-                            .fixedSize()
+                            .font(.capture(.footnote, weight: .semibold)).monospacedDigit()
+                            .foregroundStyle(PulsePlayerStyle.accent)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(PulsePlayerStyle.mist, in: .rect(cornerRadius: 7))
+                        Text(verbatim: mark.name ?? mark.numberLabel)
+                            .font(.capture(.body, weight: .medium))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 2)
                         Glyph(symbol: .play, size: 13, tint: PulsePlayerStyle.accent).accessibilityHidden(true)
                     }
                     .padding(.leading, 10).padding(.vertical, 3)
@@ -1007,12 +1057,33 @@ private struct FoldLibraryIndex: View {
                 .buttonStyle(PressStyle()).multilineTextAlignment(.leading)
                 .accessibilityHint(Text("Play from this fold"))
             }
-        } else if let step = entry.currentStep {
-            Button { play(entry.id, step.id) } label: {
-                LocalizedText(entry.finishedAt == nil ? "Resume at %@" : "Review from %@", durationLabel(step.start))
-            }
-            .buttonStyle(LibraryActionStyle())
         }
+    }
+
+    private func lessonLabel(_ entry: FoldPracticeEntry) -> some View {
+        HStack(spacing: 10) {
+            FoldPracticeThumbnail(entry: entry)
+                .frame(width: stacked ? 48 : 66, height: stacked ? 44 : 50)
+                .clipShape(.rect(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: entry.clip.title)
+                    .font(.capture(.subheadline, weight: .semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 5) {
+                    Glyph(symbol: .play, size: 11, tint: PulsePlayerStyle.accent)
+                    if entry.finishedAt != nil {
+                        LocalizedText("Completed")
+                    } else {
+                        LocalizedText("Fold %@ of %@", String(entry.currentStepNumber), String(entry.steps.count))
+                    }
+                }
+                .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+            }
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
     }
 }
 
@@ -1027,32 +1098,21 @@ private struct LibraryRowSurface: ViewModifier {
 
 private struct LibraryMovieActionStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
-    var symbol: PulsePlayerGlyph? = nil
+    let symbol: PulsePlayerGlyph
     var emphasized = false
 
     func makeBody(configuration: Configuration) -> some View {
-        let foreground = configuration.role == .destructive ? PulsePlayerStyle.danger
-            : emphasized ? PulsePlayerStyle.accent : PulsePlayerStyle.paper
-        let label = HStack(spacing: 7) {
-            if let symbol { Glyph(symbol: symbol, size: 14, tint: PulsePlayerStyle.accent) }
+        let tint = configuration.role == .destructive ? PulsePlayerStyle.danger : PulsePlayerStyle.accent
+        return HStack(spacing: 8) {
+            MenuGlyph(symbol: symbol, tint: tint)
             configuration.label
-                .font(.capture(.footnote, weight: .semibold))
+                .font(.capture(.subheadline, weight: .medium))
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .foregroundStyle(foreground)
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .frame(minWidth: 44, maxWidth: .infinity, minHeight: 34, alignment: .leading)
-
-        return Group {
-            if emphasized {
-                label.pulsePlayerGlass(in: .rect(cornerRadius: 8), tint: PulsePlayerStyle.accent.opacity(0.12),
-                                 fallback: PulsePlayerStyle.mist)
-            } else {
-                label
-            }
-        }
-        .frame(minHeight: 44)
+        .foregroundStyle(configuration.role == .destructive || emphasized ? tint : PulsePlayerStyle.paper)
+        .padding(.horizontal, 6).padding(.vertical, 4)
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         .contentShape(Rectangle())
         .opacity(!enabled ? 0.58 : configuration.isPressed ? 0.72 : 1)
     }
@@ -1081,27 +1141,25 @@ struct OfflineDownloadButton: View {
     @EnvironmentObject private var offline: OfflineStore
     @EnvironmentObject private var quota: QuotaStore
     @EnvironmentObject private var commerce: CommerceStore
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var downloadGate = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 0) {
-                downloadStatus
-                Rectangle().fill(PulsePlayerStyle.onDark.opacity(0.14)).frame(height: 1)
-                    .padding(.horizontal, 12).accessibilityHidden(true)
+            let columns = [GridItem(.adaptive(minimum: typeSize.isAccessibilitySize ? 184 : 126), spacing: 8)]
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) { downloadStatus }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 VideoExportEntry(clip: clip) { openExport in
-                    Button(action: openExport) {
-                        PlayerMenuRow(symbol: .download) { LocalizedText("Export video") }
-                    }
-                    .buttonStyle(PressStyle())
-                }
-                if let error = offline.error {
-                    ErrorNote(message: error, onMedia: true).padding(.horizontal, 12)
-                    if offline.downloadingID == clip.id {
-                        downloadAction("Retry", symbol: .download) { Task { await offline.retryCompletion() } }
-                    }
+                    PlaybackToolButton("Export video", symbol: .download, action: openExport)
                 }
             }
-            .background(PulsePlayerStyle.onDark.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+            .pulsePlayerKeepControlsTogether()
+            if let error = offline.error {
+                ErrorNote(message: error, onMedia: true)
+                if offline.downloadingID == clip.id {
+                    downloadAction("Retry", symbol: .download) { Task { await offline.retryCompletion() } }
+                }
+            }
             DownloadAllowanceSummary(onMedia: true)
         }
         .fullScreenCover(isPresented: $downloadGate) { AllowanceLimitPrompt(kind: .download) }
@@ -1147,10 +1205,7 @@ struct OfflineDownloadButton: View {
     }
 
     private func downloadAction(_ title: String, symbol: PulsePlayerGlyph, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            PlayerMenuRow(symbol: symbol, showsChevron: false) { LocalizedText(title) }
-        }
-        .buttonStyle(PressStyle())
+        PlaybackToolButton(title, symbol: symbol, action: action)
     }
 }
 
@@ -1159,22 +1214,10 @@ struct VideoExportEntry<Trigger: View>: View {
     let clip: LessonClip
     let trigger: (@escaping () -> Void) -> Trigger
     @State private var showingExport = false
-    @State private var showingMembership = false
-    @EnvironmentObject private var commerce: CommerceStore
     var body: some View {
-        trigger(openExport)
+        trigger { showingExport = true }
             .accessibilityIdentifier("player.openExport")
             .sheet(isPresented: $showingExport) { OfflineExportSheet(clip: clip).preferredColorScheme(.light) }
-            .fullScreenCover(isPresented: $showingMembership, onDismiss: {
-                if commerce.canExportMedia { showingExport = true }
-            }) {
-                MembershipView(entry: .media)
-            }
-    }
-
-    private func openExport() {
-        if commerce.canExportMedia { showingExport = true }
-        else { showingMembership = true }
     }
 }
 
@@ -1185,7 +1228,7 @@ private struct OfflineExportSheet: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                SheetHeading(title: "Export video") { departure.request { dismiss() } }
+                SheetToolbar(context: "Export video") { departure.request { dismiss() } }
                 Text(verbatim: clip.title).font(.capture(.subheadline)).fixedSize(horizontal: false, vertical: true)
                 OfflineExportButton(clip: clip)
             }.padding(22)
@@ -1297,14 +1340,11 @@ struct DownloadCompletionNotice: View {
 }
 
 // Uncached exports use the same download admission and completion journal.
-// Export is a Plus benefit; cached copies still pass the membership check.
 private struct OfflineExportButton: View {
     let clip: LessonClip
     @EnvironmentObject private var departure: ExportDeparture
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var offline: OfflineStore
-    @EnvironmentObject private var commerce: CommerceStore
-    @State private var downloadGate = false
     @State private var preparingSource = false
     @State private var exportTask: Task<Void, Never>?
     @State private var sharing: SharedFile?
@@ -1321,7 +1361,7 @@ private struct OfflineExportButton: View {
                 ActionButton(title: preparingSource ? "Preparing export…" : exportTask == nil ? "Export video" : "Exporting…",
                              primary: false, busy: exportTask != nil, action: startExport)
                     .accessibilityIdentifier("player.exportVideo")
-                if !clip.playbackURL.isFileURL, offline.cached(clip.id) == nil {
+                if clip.localMovieID == nil, offline.cachedEditableFile(for: clip.id) == nil {
                     LocalizedText("We download the video before exporting. Existing downloads are reused.")
                         .font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
                     DownloadAllowanceSummary()
@@ -1336,18 +1376,16 @@ private struct OfflineExportButton: View {
             if let exportError { ErrorNote(message: exportError) }
         }
         .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
-        .fullScreenCover(isPresented: $downloadGate) { MembershipView(entry: .media) }
         .onDisappear { exportTask?.cancel() }
     }
 
     private func shareExport(_ recording: PracticeRecording) {
         guard exportTask == nil else { return }
-        guard commerce.canExportMedia else { downloadGate = true; return }
         exportError = nil
         exportTask = Task {
             defer { exportTask = nil }
             do {
-                let url = try await library.shareFile(for: recording, commerce: commerce)
+                let url = try await library.shareFile(for: recording)
                 if !Task.isCancelled { sharing = SharedFile(url: url) }
             } catch is CancellationError { }
             catch { exportError = error.localizedDescription }
@@ -1356,7 +1394,6 @@ private struct OfflineExportButton: View {
 
     private func startExport() {
         guard exportTask == nil else { return }
-        guard let authorization = try? commerce.requireMediaExport() else { downloadGate = true; return }
         exportError = nil
         exportTask = Task { @MainActor in
             defer { exportTask = nil; preparingSource = false; departure.finish() }
@@ -1364,11 +1401,11 @@ private struct OfflineExportButton: View {
             defer { if let converted { try? FileManager.default.removeItem(at: converted) } }
             do {
                 preparingSource = true
-                let source = try await offline.editableSource(for: clip, authorization: authorization)
+                let source = try await offline.editableSource(for: clip)
                 preparingSource = false
-                var output = source
-                if !["mp4", "mov", "m4v"].contains(source.pathExtension.lowercased()) {
-                    let asset = AVURLAsset(url: source)
+                var output = source.url
+                if !["mp4", "mov", "m4v"].contains(source.url.pathExtension.lowercased()) {
+                    let asset = AVURLAsset(url: source.url)
                     guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality),
                           session.supportedFileTypes.contains(.mp4) else {
                         throw PulsePlayerError.service("This video format cannot be exported. Please use an MP4 or MOV file.")
@@ -1380,7 +1417,7 @@ private struct OfflineExportButton: View {
                     output = destination
                 }
                 try Task.checkCancellation()
-                let recording = try await library.saveExport(output, title: clip.title, authorization: authorization, commerce: commerce)
+                let recording = try await library.saveExport(output, title: clip.title, beforeCommit: source.checkOwner)
                 if !Task.isCancelled { savedExport = recording }
             } catch is CancellationError { }
             catch {
@@ -1401,15 +1438,19 @@ struct DownloadAllowanceSummary: View {
         VStack(alignment: .leading, spacing: 8) {
             AllowanceStatusPanel(kinds: [.download], onMedia: onMedia)
             if quota.canRequestReward(for: .download, premium: commerce.premium) {
-                if onMedia {
-                    Button { showingReward = true } label: {
-                        PlayerMenuRow(symbol: .play) { LocalizedText("Get more downloads") }
+                let tint = onMedia ? PulsePlayerStyle.mediaAccent : PulsePlayerStyle.accent
+                Button { showingReward = true } label: {
+                    HStack(spacing: 8) {
+                        Glyph(symbol: .play, size: 14, tint: tint)
+                        LocalizedText("Get more downloads").font(.capture(.subheadline, weight: .semibold))
                     }
-                    .buttonStyle(PressStyle())
-                    .background(PulsePlayerStyle.onDark.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                } else {
-                    ActionButton(title: "Get more downloads", primary: false) { showingReward = true }
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 14).frame(minHeight: 44)
+                    .pulsePlayerGlass(in: Capsule(), fallback: onMedia ? PulsePlayerStyle.mediaSurface : PulsePlayerStyle.surface,
+                                      onDark: onMedia)
+                    .contentShape(Capsule())
                 }
+                .buttonStyle(PressStyle())
             }
         }
             .frame(maxWidth: .infinity, alignment: .leading)

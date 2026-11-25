@@ -2,11 +2,6 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct FoldNotebookView: View {
-    let lessonFirst: Bool
-
-    init(lessonFirst: Bool = false) {
-        self.lessonFirst = lessonFirst
-    }
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var api: APIClient
     @EnvironmentObject private var library: LibraryStore
@@ -16,120 +11,104 @@ struct FoldNotebookView: View {
     @State private var error: String?
     @State private var export: FoldTimesCSV?
     @State private var exporting = false
-    @State private var clipEntry: FoldPracticeEntry?
+    let openExport: (FoldPracticeEntry) -> Void
+    @State private var importing = false
 
     var body: some View {
         let entries = practice.recent(owner: api.offlineOwnerID, library: library, offline: offline)
-        VStack(spacing: 0) {
-            SheetHeading(title: "Practice notebook") { dismiss() }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    if lessonFirst { lesson }
-                    if !entries.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            SceneTitle("Your folds", size: 28)
-                            ForEach(entries) { entry in
-                                session(entry)
-                                Divider()
-                            }
-                        }
+        ScenePage { container in
+            let stacked = PulsePlayerStyle.pageContentWidth(in: container) < 320
+                || PulsePlayerStyle.intersectsReservedRegion(CGRect(origin: .zero, size: container.size), in: container)
+            LazyVStack(alignment: .leading, spacing: 18) {
+                if let message = practice.error {
+                    ErrorNote(message: message)
+                    if practice.needsLoadRetry {
+                        Button("Try again", action: practice.retryLoading).buttonStyle(CompactActionStyle())
                     }
-                    if !lessonFirst { lesson }
-                    if let error {
-                        LocalizedText(error).font(.callout).foregroundStyle(PulsePlayerStyle.danger)
-                    }
-                }.pulsePlayerPage()
+                }
+                if entries.isEmpty && !practice.needsLoadRetry {
+                    EmptyStateScene(appearance: .notebook, title: "No folds marked yet", message: "Mark a fold in a video to return to it here.")
+                    VideoImportActions(onImported: playImport, importing: $importing, presentation: .sources(stacked: stacked))
+                        .pulsePlayerKeepControlsTogether()
+                }
+                ForEach(entries) { entry in
+                    session(entry)
+                }
+                if let error { ErrorNote(message: error) }
             }
         }
+        .sceneBack(context: "Practice notebook", disabled: importing) { dismiss() }
         .foregroundStyle(PulsePlayerStyle.paper)
         .pulsePlayerScreenBackground()
         .fullScreenCover(item: $player) { PlayerScreen(route: $0) }
-        .sheet(item: $clipEntry) { FoldClipExportView(entry: $0) }
         .fileExporter(isPresented: $exporting, document: export, contentType: .commaSeparatedText,
                       defaultFilename: "PulsePlayer-fold-times") { result in
             if case .failure(let problem) = result { error = problem.localizedDescription }
         }
     }
 
-    private var lesson: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            SceneTitle("Fold a paper crane", size: 34)
-            Image("PaperCranePreview.jpg")
-                .resizable().scaledToFit()
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .accessibilityHidden(true)
-            LocalizedText("One square sheet · 5 min 35 sec")
-                .font(.subheadline.weight(.semibold)).foregroundStyle(PulsePlayerStyle.secondary)
-            LocalizedText("Take a square sheet. Follow the whole lesson or jump to the fold you have in your hands.")
-                .fixedSize(horizontal: false, vertical: true)
-            ActionButton(title: "Play the crane lesson") {
-                do {
-                    error = nil
-                    player = try library.paperCraneRoute()
-                } catch { self.error = error.localizedDescription }
-            }
-            ForEach(CraneChapter.guide) { chapter in
-                Button {
-                    do {
-                        error = nil
-                        player = try library.paperCraneRoute(startingAt: chapter)
-                    } catch { self.error = error.localizedDescription }
-                } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        Text(verbatim: durationLabel(chapter.start))
-                            .monospacedDigit().foregroundStyle(PulsePlayerStyle.secondary)
-                            .environment(\.layoutDirection, .leftToRight)
-                        LocalizedText(chapter.title).multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(PressStyle())
-                Divider()
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                LocalizedText("Film by Tavin. Re-encoded for iOS. Preview taken from the film.")
-                    .font(.caption)
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 18) { sourceLinks }
-                    VStack(alignment: .leading, spacing: 0) { sourceLinks }
-                }
-            }.foregroundStyle(PulsePlayerStyle.secondary)
+    private func playImport(_ movie: PracticeRecording) {
+        guard let route = PlayerRoute.localMovies([movie], selected: movie, library: library) else {
+            error = "This video file is no longer available."
+            return
         }
-    }
-
-    @ViewBuilder private var sourceLinks: some View {
-        if let source = URL(string: "https://commons.wikimedia.org/wiki/File:OrigamiCrane.ogv"),
-           let license = URL(string: "https://creativecommons.org/licenses/by/3.0/") {
-            Link(destination: source) { LocalizedText("Original film").frame(minHeight: 44) }
-            Link(destination: license) { Text(verbatim: "CC BY 3.0").frame(minHeight: 44) }
-        }
+        error = nil
+        player = route
     }
 
     private func session(_ entry: FoldPracticeEntry) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(verbatim: entry.clip.title).font(.headline)
-            HStack(alignment: .firstTextBaseline) {
-                LocalizedText(entry.finishedAt == nil ? "In practice" : "Completed")
-                Text(entry.updatedAt, style: .date)
-            }.font(.caption).foregroundStyle(PulsePlayerStyle.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                FoldPracticeThumbnail(entry: entry)
+                    .frame(width: 78, height: 62)
+                    .clipShape(.rect(cornerRadius: 10))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(verbatim: entry.clip.title).font(.capture(.headline))
+                    LocalizedText(entry.finishedAt == nil ? "In practice" : "Completed")
+                        .font(.capture(.footnote, weight: .semibold)).foregroundStyle(PulsePlayerStyle.accent)
+                    Text(entry.updatedAt, style: .date).font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
+                }
+            }
             ForEach(Array(entry.steps.enumerated()), id: \.element.id) { offset, step in
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(verbatim: durationLabel(step.start, fractional: true))
-                        .monospacedDigit().foregroundStyle(PulsePlayerStyle.secondary)
-                    if let name = step.displayName(), !name.isEmpty {
-                        Text(verbatim: name)
-                    } else {
-                        LocalizedText("Fold %@", String(offset + 1))
+                Button {
+                    guard let route = entry.route(library: library, offline: offline) else {
+                        error = "This video is no longer in the library."
+                        return
                     }
-                }.font(.subheadline).padding(.vertical, 2)
+                    do {
+                        try practice.select(step, in: entry.id)
+                        error = nil
+                        player = route
+                    } catch { self.error = error.localizedDescription }
+                } label: {
+                    HStack(spacing: 10) {
+                        Text(verbatim: durationLabel(step.start)).monospacedDigit()
+                            .foregroundStyle(PulsePlayerStyle.accent)
+                        if let name = step.displayName(), !name.isEmpty {
+                            Text(verbatim: name)
+                        } else {
+                            LocalizedText("Fold %@", String(offset + 1))
+                        }
+                        Spacer(minLength: 2)
+                        Glyph(symbol: step.id == entry.selectedID ? .bookmark : .play, size: 14, tint: PulsePlayerStyle.accent)
+                    }
+                    .font(.capture(.subheadline)).multilineTextAlignment(.leading)
+                    .frame(minHeight: 44).contentShape(Rectangle())
+                    .overlay(alignment: .bottom) { Divider().accessibilityHidden(true) }
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityAddTraits(step.id == entry.selectedID ? .isSelected : [])
             }
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 18) { sessionActions(entry) }
-                VStack(alignment: .leading, spacing: 0) { sessionActions(entry) }
+                HStack(spacing: 12) { sessionActions(entry) }.fixedSize(horizontal: true, vertical: false)
+                VStack(alignment: .leading, spacing: 4) { sessionActions(entry) }
             }
-        }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(PulsePlayerStyle.surface, in: .rect(cornerRadius: 18))
+        .pulsePlayerKeepControlsTogether()
     }
 
     @ViewBuilder private func sessionActions(_ entry: FoldPracticeEntry) -> some View {
@@ -141,33 +120,34 @@ struct FoldNotebookView: View {
             LocalizedText(entry.finishedAt == nil ? "Resume practice" : "Review folds")
                 .font(.subheadline.weight(.semibold)).frame(minHeight: 44)
         }
-        Button {
-            clipEntry = entry
-        } label: {
-            LocalizedText("Export a fold").font(.subheadline).frame(minHeight: 44)
-        }.buttonStyle(PressStyle())
-        Button {
-            export = FoldTimesCSV(entry)
-            exporting = true
-        } label: {
-            LocalizedText("Export fold times").font(.subheadline).frame(minHeight: 44)
+        .buttonStyle(CompactActionStyle())
+        GlassActionMenu(title: "Export", items: [
+            ActionMenuItem("Export a fold", .edit) { openExport(entry) },
+            ActionMenuItem("Export fold times", .download) {
+                export = FoldTimesCSV(entry)
+                exporting = true
+            }
+        ]) {
+            HStack(spacing: 6) {
+                Glyph(symbol: .download, size: 15, tint: PulsePlayerStyle.accent)
+                LocalizedText("Export").font(.capture(.subheadline, weight: .medium))
+            }
+            .padding(.horizontal, 8).frame(minHeight: 44)
         }
     }
 }
 
-private struct FoldClipExportView: View {
+struct FoldClipExportView: View {
     let entry: FoldPracticeEntry
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
     @EnvironmentObject private var library: LibraryStore
-    @EnvironmentObject private var commerce: CommerceStore
     @EnvironmentObject private var offline: OfflineStore
     @State private var selectedID: UUID
     @State private var working: Task<Void, Never>?
     @State private var preparingSource = false
     @State private var saved: PracticeRecording?
     @State private var sharing: SharedFile?
-    @State private var showingPlus = false
     @State private var error: String?
 
     init(entry: FoldPracticeEntry) {
@@ -176,54 +156,51 @@ private struct FoldClipExportView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            SheetHeading(title: "Export a fold") { dismiss() }.disabled(working != nil)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text(verbatim: entry.clip.title).font(.capture(.headline))
-                    ForEach(Array(entry.steps.enumerated()), id: \.element.id) { offset, step in
-                        Button {
-                            guard selectedID != step.id else { return }
-                            selectedID = step.id
-                            error = nil
-                            saved = nil
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(verbatim: name(for: step, at: offset))
-                                    .font(.capture(.subheadline, weight: .semibold))
-                                HStack {
-                                    if let duration = entry.duration ?? entry.clip.duration,
-                                       let range = entry.loopRange(for: step, duration: duration) {
-                                        Text(verbatim: durationLabel(range.lowerBound, fractional: true) + " – " + durationLabel(range.upperBound, fractional: true))
-                                            .monospacedDigit()
-                                    }
-                                    if selectedID == step.id { LocalizedText("Selected") }
-                                }.font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
-                            }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
-                        }.buttonStyle(PressStyle()).disabled(working != nil)
-                            .accessibilityAddTraits(selectedID == step.id ? .isSelected : [])
-                        Divider()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(verbatim: entry.clip.title).font(.capture(.headline))
+                ForEach(Array(entry.steps.enumerated()), id: \.element.id) { offset, step in
+                    Button {
+                        guard selectedID != step.id else { return }
+                        selectedID = step.id
+                        error = nil
+                        saved = nil
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(verbatim: name(for: step, at: offset))
+                                .font(.capture(.subheadline, weight: .semibold))
+                            HStack {
+                                if let duration = entry.duration ?? entry.clip.duration,
+                                   let range = entry.loopRange(for: step, duration: duration) {
+                                    Text(verbatim: durationLabel(range.lowerBound, fractional: true) + " – " + durationLabel(range.upperBound, fractional: true))
+                                        .monospacedDigit()
+                                }
+                                if selectedID == step.id { LocalizedText("Selected") }
+                            }.font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
+                        }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                    }.buttonStyle(PressStyle()).disabled(working != nil)
+                        .accessibilityAddTraits(selectedID == step.id ? .isSelected : [])
+                    Divider()
+                }
+                if let saved {
+                    SavedVideoExport(movie: saved, sharing: working != nil) { share(saved) }
+                } else if working != nil {
+                    AccountLoadingIndicator(title: preparingSource ? "Preparing export…" : "Exporting…")
+                    Button("Cancel export") { working?.cancel() }.buttonStyle(CompactActionStyle())
+                } else if let index = entry.steps.firstIndex(where: { $0.id == selectedID }) {
+                    if case .lesson = entry.id, offline.cachedEditableFile(for: entry.clip.id) == nil {
+                        LocalizedText("We download the video before exporting. Existing downloads are reused.")
+                            .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
                     }
-                    if let saved {
-                        SavedVideoExport(movie: saved, sharing: working != nil) { share(saved) }
-                    } else if working != nil {
-                        AccountLoadingIndicator(title: preparingSource ? "Preparing export…" : "Exporting…")
-                        Button("Cancel export") { working?.cancel() }.buttonStyle(CompactActionStyle())
-                    } else if let index = entry.steps.firstIndex(where: { $0.id == selectedID }) {
-                        if case .lesson = entry.id, offline.cached(entry.clip.id)?.isHLS != false {
-                            LocalizedText("We download the video before exporting. Existing downloads are reused.")
-                                .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                        }
-                        ActionButton(title: "Save fold as MP4") { save(entry.steps[index], at: index) }
-                    }
-                    if let error { ErrorNote(message: error) }
-                }.pulsePlayerPage()
-            }
+                    ActionButton(title: "Save fold as MP4") { save(entry.steps[index], at: index) }
+                }
+                if let error { ErrorNote(message: error) }
+            }.pulsePlayerPage()
         }
+        .sceneBack(context: "Export a fold", disabled: working != nil) { dismiss() }
         .foregroundStyle(PulsePlayerStyle.paper).pulsePlayerScreenBackground()
         .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
-        .fullScreenCover(isPresented: $showingPlus) { MembershipView(entry: .foldVideo) }
-        .interactiveDismissDisabled(working != nil)
+        .navigationBarBackButtonHidden(true)
         .onDisappear { working?.cancel() }
     }
 
@@ -235,7 +212,6 @@ private struct FoldClipExportView: View {
     private func save(_ step: FoldPracticeStep, at index: Int) {
         guard working == nil else { return }
         error = nil
-        guard let authorization = try? commerce.requireMediaExport() else { showingPlus = true; return }
         let title = entry.clip.title + " · " + name(for: step, at: index)
         working = Task { @MainActor in
             defer { working = nil; preparingSource = false }
@@ -243,23 +219,25 @@ private struct FoldClipExportView: View {
             defer { try? FileManager.default.removeItem(at: output) }
             do {
                 let clip: LessonClip
+                let owner: String?
                 switch entry.id {
                 case .movie:
                     guard let local = entry.route(library: library, offline: offline)?.clips.first else {
                         throw PulsePlayerError.service("This video is no longer in the library.")
                     }
                     clip = local
+                    owner = nil
                 case .lesson(_, let recordOwner, _):
-                    guard recordOwner == authorization.owner else { throw PulsePlayerError.unauthorized }
                     clip = entry.clip
+                    owner = recordOwner
                 }
                 preparingSource = true
-                let source = try await offline.editableSource(for: clip, authorization: authorization)
+                let source = try await offline.editableSource(for: clip, expectedOwner: owner)
                 preparingSource = false
                 try Task.checkCancellation()
-                try await VideoEditor.writeFold(step, in: entry, source: source, destination: output)
+                try await VideoEditor.writeFold(step, in: entry, source: source.url, destination: output)
                 try Task.checkCancellation()
-                saved = try await library.saveExport(output, title: title, authorization: authorization, commerce: commerce)
+                saved = try await library.saveExport(output, title: title, beforeCommit: source.checkOwner)
             } catch {
                 if !Task.isCancelled { self.error = error.localizedDescription }
             }
@@ -269,11 +247,10 @@ private struct FoldClipExportView: View {
     private func share(_ movie: PracticeRecording) {
         guard working == nil else { return }
         error = nil
-        guard commerce.canExportMedia else { showingPlus = true; return }
         working = Task {
             defer { working = nil }
             do {
-                let url = try await library.shareFile(for: movie, commerce: commerce)
+                let url = try await library.shareFile(for: movie)
                 try Task.checkCancellation()
                 sharing = SharedFile(url: url)
             } catch {

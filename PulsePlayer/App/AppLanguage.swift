@@ -153,52 +153,72 @@ struct LocalizedText: View {
 struct LanguagePicker: View {
     @AppStorage(AppLanguage.preferenceKey) private var languageCode = AppLanguage.defaultSelection
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
+    @Environment(\.dynamicTypeSize) private var typeSize
+
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeading(title: "App language") { dismiss() }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(spacing: 0) {
-                        Button { languageCode = AppLanguage.systemSelection } label: {
-                            HStack(spacing: 16) {
-                                LocalizedText("Follow system").font(.capture(.body, weight: .medium))
-                                Spacer(minLength: 8)
-                                if languageCode == AppLanguage.systemSelection {
-                                    LocalizedText("Selected").font(.capture(.caption, weight: .semibold)).foregroundStyle(PulsePlayerStyle.accent)
-                                }
-                            }.padding(20).frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
-                                .background(languageCode == AppLanguage.systemSelection ? PulsePlayerStyle.raised : Color.clear)
-                                .contentShape(Rectangle())
-                        }.buttonStyle(PressStyle())
-                            .accessibilityAddTraits(languageCode == AppLanguage.systemSelection ? .isSelected : [])
-                            .accessibilityIdentifier("language.system")
-                        Divider().overlay(PulsePlayerStyle.line).accessibilityHidden(true)
+            ScenePage { container in
+                let divided = PulsePlayerStyle.intersectsReservedRegion(CGRect(origin: .zero, size: container.size), in: container)
+                let count = typeSize.isAccessibilitySize || divided || PulsePlayerStyle.pageContentWidth(in: container) < 290 ? 1 : 2
+                VStack(alignment: .leading, spacing: 12) {
+                    Button { languageCode = AppLanguage.systemSelection } label: {
+                        HStack(spacing: 12) {
+                            Glyph(symbol: .settings, size: 18, tint: PulsePlayerStyle.accent)
+                            LocalizedText("Follow system").font(.capture(.subheadline, weight: .semibold))
+                            Spacer(minLength: 0)
+                            Text(verbatim: AppLanguage.systemLanguage().nativeName)
+                                .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+                            if languageCode == AppLanguage.systemSelection {
+                                Glyph(symbol: .bookmark, size: 15, tint: PulsePlayerStyle.accent)
+                            }
+                        }
+                        .multilineTextAlignment(.leading).padding(.horizontal, 14).padding(.vertical, 8)
+                        .frame(minHeight: 48)
+                        .pulsePlayerGlass(in: .rect(cornerRadius: 14), fallback: PulsePlayerStyle.raised)
+                        .contentShape(.rect(cornerRadius: 14))
+                    }
+                    .buttonStyle(PressStyle())
+                    .accessibilityAddTraits(languageCode == AppLanguage.systemSelection ? .isSelected : [])
+                    .accessibilityIdentifier("language.system")
+
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .topLeading), count: count), spacing: 8) {
                         ForEach(AppLanguage.allCases) { language in
-                            Button {
-                                languageCode = language.rawValue
-                            } label: {
-                                HStack(spacing: 16) {
-                                    Text(verbatim: language.nativeName).font(.capture(.body, weight: .medium))
-                                        .environment(\.layoutDirection, language.direction)
-                                    Spacer(minLength: 8)
-                                    if languageCode == language.rawValue {
-                                        LocalizedText("Selected").font(.capture(.caption, weight: .semibold))
-                                            .foregroundStyle(PulsePlayerStyle.accent)
-                                    }
-                                }.padding(20).frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
-                                    .background(languageCode == language.rawValue ? PulsePlayerStyle.raised : Color.clear)
-                                    .contentShape(Rectangle())
-                            }.buttonStyle(PressStyle())
-                                .accessibilityAddTraits(languageCode == language.rawValue ? .isSelected : [])
-                                .accessibilityIdentifier("language.\(language.rawValue)")
-                            if language != AppLanguage.allCases.last { Divider().overlay(PulsePlayerStyle.line) }
+                            languageOption(language)
                         }
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 22))
-                    .pulsePlayerGlass(in: .rect(cornerRadius: 22), interactive: false)
-                }.pulsePlayerPage()
+                }
+                .pulsePlayerKeepControlsTogether()
             }
-        }.foregroundStyle(PulsePlayerStyle.paper).pulsePlayerScreenBackground()
+        }
+        .foregroundStyle(PulsePlayerStyle.paper).pulsePlayerScreenBackground()
+        .sceneBack(context: "App language") { dismiss() }
+    }
+
+    private func languageOption(_ language: AppLanguage) -> some View {
+        let selected = languageCode == language.rawValue
+        let translated = locale.localizedString(forLanguageCode: language.rawValue)
+        return Button { languageCode = language.rawValue } label: {
+            HStack(alignment: .top, spacing: 6) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: language.nativeName).font(.capture(.headline))
+                        .environment(\.layoutDirection, language.direction)
+                    if let translated, translated.localizedCaseInsensitiveCompare(language.nativeName) != .orderedSame {
+                        Text(verbatim: translated).font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+                if selected { Glyph(symbol: .bookmark, size: 14, tint: PulsePlayerStyle.accent) }
+            }
+            .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading)
+            .background(selected ? PulsePlayerStyle.mist : PulsePlayerStyle.surface, in: .rect(cornerRadius: 14))
+            .contentShape(.rect(cornerRadius: 14))
+        }
+        .buttonStyle(PressStyle())
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("language.\(language.rawValue)")
     }
 }
 

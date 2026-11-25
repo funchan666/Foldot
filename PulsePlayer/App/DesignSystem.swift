@@ -58,20 +58,12 @@ enum ArtworkCatalog {
     }
 }
 
-struct ScenePage<Opening: View, PageContent: View>: View {
-    let depth: CGFloat
-    let openingGap: CGFloat
+struct ScenePage<PageContent: View>: View {
     let scrollsBehindTabBar: Bool
-    let opening: (CGFloat) -> Opening
     let content: (GeometryProxy) -> PageContent
 
-    init(depth: CGFloat, openingGap: CGFloat = 16, scrollsBehindTabBar: Bool = false,
-         @ViewBuilder opening: @escaping (CGFloat) -> Opening,
-         @ViewBuilder content: @escaping (GeometryProxy) -> PageContent) {
-        self.depth = depth
-        self.openingGap = openingGap
+    init(scrollsBehindTabBar: Bool = false, @ViewBuilder content: @escaping (GeometryProxy) -> PageContent) {
         self.scrollsBehindTabBar = scrollsBehindTabBar
-        self.opening = opening
         self.content = content
     }
 
@@ -99,28 +91,8 @@ struct ScenePage<Opening: View, PageContent: View>: View {
 
     private func scrollingPage(in container: GeometryProxy) -> some View {
         ScrollView {
-            VStack(spacing: 0) {
-                if depth > 0 {
-                    let height = max(44, depth)
-                    opening(height)
-                        .frame(maxWidth: .infinity, minHeight: height, alignment: .bottomLeading)
-                        .pageHorizontalMargins()
-                        .frame(maxWidth: 680)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 10)
-                        .padding(.bottom, openingGap)
-                }
-                content(container).pulsePlayerPage()
-            }
+            content(container).pulsePlayerPage()
         }
-    }
-}
-
-extension ScenePage where Opening == EmptyView {
-    init(depth: CGFloat = 0, scrollsBehindTabBar: Bool = false,
-         @ViewBuilder content: @escaping (GeometryProxy) -> PageContent) {
-        self.init(depth: depth, openingGap: 0, scrollsBehindTabBar: scrollsBehindTabBar,
-                  opening: { _ in EmptyView() }, content: content)
     }
 }
 
@@ -284,24 +256,86 @@ struct ActionLabel: View {
 }
 
 struct EmptyStateScene: View {
+    enum Appearance {
+        case shelf(PulsePlayerGlyph)
+        case screening(PulsePlayerGlyph)
+        case notebook
+        case inline(PulsePlayerGlyph)
+    }
+
+    let appearance: Appearance
     var title: String? = nil
     var message: String? = nil
+    var onMedia = false
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    private var accent: Color { onMedia ? PulsePlayerStyle.mediaAccent : PulsePlayerStyle.accent }
+    private var foreground: Color { onMedia ? PulsePlayerStyle.onDark : PulsePlayerStyle.paper }
+    private var secondary: Color { onMedia ? PulsePlayerStyle.mediaSecondary : PulsePlayerStyle.secondary }
+    private var surface: Color { onMedia ? PulsePlayerStyle.mediaSurface : PulsePlayerStyle.raised }
+    private var row: AnyLayout {
+        typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10))
+            : AnyLayout(HStackLayout(alignment: .center, spacing: 14))
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        composition
+            .accessibilityElement(children: .combine)
+            .pulsePlayerKeepControlsTogether()
+    }
+
+    @ViewBuilder private var composition: some View {
+        switch appearance {
+        case .shelf(let symbol):
+            row {
+                copy()
+                Glyph(symbol: symbol, size: 42, tint: accent.opacity(0.72))
+            }
+            .padding(20)
+            .background(surface, in: .rect(cornerRadius: 20))
+        case .screening(let symbol):
+            VStack(spacing: 12) {
+                Glyph(symbol: symbol, size: 36, tint: PulsePlayerStyle.mediaAccent)
+                copy(centered: true, inverse: true)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, minHeight: 124)
+            .background(PulsePlayerStyle.mediaSurface, in: .rect(cornerRadius: 16))
+        case .notebook:
+            VStack(alignment: .leading, spacing: 12) {
+                Glyph(symbol: .fold, size: 32, tint: accent)
+                copy()
+                Divider().overlay(accent.opacity(0.24)).accessibilityHidden(true)
+            }
+            .padding(.vertical, 10)
+        case .inline(let symbol):
+            row {
+                Glyph(symbol: symbol, size: 21, tint: accent)
+                    .frame(width: 38, height: 38)
+                    .background(surface, in: Circle())
+                copy(compact: true)
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
+    private func copy(centered: Bool = false, inverse: Bool = false, compact: Bool = false) -> some View {
+        VStack(alignment: centered ? .center : .leading, spacing: 5) {
             if let title {
-                LocalizedText(title).font(.capture(.headline))
-                    .foregroundStyle(PulsePlayerStyle.paper)
+                LocalizedText(title)
+                    .font(.capture(compact ? .subheadline : .headline, weight: .semibold))
+                    .foregroundStyle(inverse ? PulsePlayerStyle.onDark : foreground)
                     .accessibilityAddTraits(.isHeader)
             }
             if let message {
                 LocalizedText(message).font(.capture(.subheadline))
-                    .foregroundStyle(PulsePlayerStyle.secondary)
+                    .foregroundStyle(inverse ? PulsePlayerStyle.mediaSecondary : secondary)
             }
         }
+        .multilineTextAlignment(centered ? .center : .leading)
         .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
     }
 }
 
@@ -470,15 +504,16 @@ extension View {
         modifier(PulsePlayerGlass(shape: shape, tint: tint, fallback: fallback, interactive: interactive, onDark: onDark))
     }
 
-    func sceneDismiss(symbol: PulsePlayerGlyph = .close, label: String = "Close", edge: HorizontalEdge = .trailing,
-                      disabled: Bool = false, action: @escaping () -> Void) -> some View {
-        overlay(alignment: .top) {
-            IconButton(symbol: symbol, label: label, glass: true, action: action)
+    func sceneBack(context: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+        safeAreaInset(edge: .top, spacing: 0) {
+            IconButton(symbol: .back, label: "Back", glass: true, action: action)
                 .disabled(disabled)
+                .accessibilityValue(Text(LocalizedStringKey(context)))
                 .accessibilitySortPriority(1)
-                .frame(maxWidth: .infinity, alignment: edge == .leading ? .leading : .trailing)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .pulsePlayerKeepControlsTogether()
                 .pageHorizontalMargins()
-                .padding(.top, 8)
+                .padding(.top, 6)
         }
     }
 }
@@ -576,18 +611,141 @@ struct MediaCover: View {
         }.clipped()
     }
 }
-struct SheetHeading: View {
+struct ActionMenuItem: Identifiable {
     let title: String
-    var close: () -> Void
+    let symbol: PulsePlayerGlyph
+    let selected: Bool
+    let destructive: Bool
+    let identifier: String?
+    let action: () -> Void
+    var id: String { identifier ?? title }
+
+    init(_ title: String, _ symbol: PulsePlayerGlyph, selected: Bool = false, destructive: Bool = false,
+         identifier: String? = nil, action: @escaping () -> Void) {
+        self.title = title
+        self.symbol = symbol
+        self.selected = selected
+        self.destructive = destructive
+        self.identifier = identifier
+        self.action = action
+    }
+}
+
+struct MenuGlyph: View {
+    let symbol: PulsePlayerGlyph
+    let tint: Color
+
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            LocalizedText(title).font(.capture(.headline))
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(minHeight: 44, alignment: .leading)
-                .accessibilityAddTraits(.isHeader)
-            Spacer()
+        Glyph(symbol: symbol, size: 16, tint: tint)
+            .frame(width: 30, height: 30)
+            .background(tint.opacity(0.11), in: .rect(cornerRadius: 9))
+            .accessibilityHidden(true)
+    }
+}
+
+struct GlassActionMenu<Trigger: View>: View {
+    let title: String
+    var onDark = false
+    let items: [ActionMenuItem]
+    let label: () -> Trigger
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @State private var presented = false
+    @State private var afterDismiss: (() -> Void)?
+
+    init(title: String, onDark: Bool = false, items: [ActionMenuItem], @ViewBuilder label: @escaping () -> Trigger) {
+        self.title = title
+        self.onDark = onDark
+        self.items = items
+        self.label = label
+    }
+
+    var body: some View {
+        Button { presented = true } label: { label() }
+            .buttonStyle(PressStyle())
+            .sheet(isPresented: $presented, onDismiss: {
+                // Present a picker or destination after UIKit releases the menu sheet.
+                let action = afterDismiss
+                afterDismiss = nil
+                action?()
+            }) {
+                let ink = onDark ? PulsePlayerStyle.onDark : PulsePlayerStyle.paper
+                let accent = onDark ? PulsePlayerStyle.mediaAccent : PulsePlayerStyle.accent
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Spacer(minLength: 8)
+                            Button { presented = false } label: {
+                                Glyph(symbol: .close, size: 14, tint: ink)
+                                    .frame(width: 44, height: 44).contentShape(Circle())
+                            }.buttonStyle(PressStyle()).accessibilityLabel(Text("Close"))
+                                .accessibilityValue(Text(LocalizedStringKey(title)))
+                        }
+                        ForEach(items) { item in
+                            let tint = item.destructive ? (onDark ? PulsePlayerStyle.mediaError : PulsePlayerStyle.danger) : accent
+                            Button(role: item.destructive ? .destructive : nil) {
+                                guard presented, afterDismiss == nil else { return }
+                                afterDismiss = item.action
+                                presented = false
+                            } label: {
+                                HStack(spacing: 12) {
+                                    MenuGlyph(symbol: item.symbol, tint: tint)
+                                    LocalizedText(item.title)
+                                        .font(.capture(.body, weight: item.selected ? .semibold : .medium))
+                                        .foregroundStyle(item.destructive ? tint : ink)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Spacer(minLength: 2)
+                                    if item.selected {
+                                        LocalizedText("Selected").font(.capture(.caption, weight: .semibold))
+                                            .foregroundStyle(accent)
+                                    }
+                                }
+                                .multilineTextAlignment(.leading)
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                                .background(tint.opacity(item.selected ? 0.16 : 0.05), in: .rect(cornerRadius: 13))
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(PressStyle())
+                            .accessibilityAddTraits(item.selected ? .isSelected : [])
+                            .accessibilityIdentifier(item.id)
+                        }
+                    }
+                    .foregroundStyle(ink)
+                    .pulsePlayerKeepControlsTogether()
+                    .padding(.horizontal, 20).padding(.vertical, 18)
+                    .frame(maxWidth: 520).frame(maxWidth: .infinity)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .presentationDetents(typeSize.isAccessibilitySize ? [.large] : [.height(CGFloat(88 + items.count * 56)), .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground {
+                    Color.clear.pulsePlayerGlass(in: .rect(cornerRadius: 26),
+                        fallback: onDark ? PulsePlayerStyle.mediaSurface : PulsePlayerStyle.surface,
+                        interactive: false, onDark: onDark).ignoresSafeArea()
+                }
+                .preferredColorScheme(onDark ? .dark : .light)
+            }
+    }
+}
+
+struct SheetToolbar: View {
+    let context: String
+    var showsConfirmation = false
+    var close: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            if showsConfirmation {
+                LocalizedText(context).font(.capture(.headline))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+            }
+            Spacer(minLength: 0)
             IconButton(symbol: .close, label: "Close", glass: true, action: close)
-        }.pageHorizontalMargins().padding(.top, 8)
+                .accessibilityValue(showsConfirmation ? Text(verbatim: "") : Text(LocalizedStringKey(context)))
+        }
+        .pulsePlayerKeepControlsTogether()
+        .pageHorizontalMargins().padding(.top, 6)
     }
 }
 
@@ -646,29 +804,56 @@ struct CaptureSurface: View {
 struct ChoiceStrip: View {
     let values: [String]
     let selected: String
+    var title: (String) -> String = { $0 }
     let select: (String) -> Void
+    @Environment(\.dynamicTypeSize) private var typeSize
+
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            PulsePlayerGlassGroup {
-                HStack(spacing: 8) {
-                    ForEach(values, id: \.self) { value in
-                        let isSelected = selected == value
-                        Button { select(value) } label: {
-                            LocalizedText(value).font(.capture(.footnote, weight: .semibold))
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                                .padding(.horizontal, 16).padding(.vertical, 10)
-                                .frame(minHeight: 44)
-                                .foregroundStyle(isSelected ? PulsePlayerStyle.accent : PulsePlayerStyle.paper)
-                                .pulsePlayerGlass(in: Capsule(), tint: isSelected ? PulsePlayerStyle.accent.opacity(0.17) : nil,
-                                            fallback: isSelected ? PulsePlayerStyle.mist : PulsePlayerStyle.surface)
-                                .environment(\.colorScheme, .light)
-                                .contentShape(.interaction, Capsule())
-                        }.buttonStyle(PressStyle())
-                            .accessibilityAddTraits(isSelected ? .isSelected : [])
+        Group {
+            if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 2) { options }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 2) { options }.fixedSize(horizontal: true, vertical: false)
+                    ScrollViewReader { scroll in
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 2) { options }
+                        }
+                        .scrollIndicators(.hidden)
+                        .onChange(of: selected, initial: true) { _, value in scroll.scrollTo(value) }
                     }
                 }
             }
+        }
+        .padding(4)
+        .background(PulsePlayerStyle.raised, in: .rect(cornerRadius: 17))
+        .accessibilityElement(children: .contain)
+    }
+
+    private var options: some View {
+        ForEach(values, id: \.self) { value in
+            let active = selected == value
+            Button { select(value) } label: {
+                LocalizedText(title(value))
+                    .font(.capture(.subheadline, weight: active ? .bold : .medium))
+                    .foregroundStyle(active ? PulsePlayerStyle.accent : PulsePlayerStyle.secondary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: !typeSize.isAccessibilitySize, vertical: true)
+                    .padding(.horizontal, 11).padding(.vertical, 6)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .background {
+                        if active {
+                            Color.clear.pulsePlayerGlass(in: .rect(cornerRadius: 13),
+                                tint: PulsePlayerStyle.surface.opacity(0.46), fallback: PulsePlayerStyle.surface)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .contentShape(.interaction, Rectangle())
+            }
+            .buttonStyle(PressStyle())
+            .accessibilityLabel(Text(LocalizedStringKey(value)))
+            .accessibilityAddTraits(active ? .isSelected : [])
+            .id(value)
         }
     }
 }

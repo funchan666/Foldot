@@ -90,34 +90,70 @@ struct AccountDecisionDialog: View {
     }
 }
 
-struct PolicyDocument: Identifiable {
+struct PolicyDocument: Identifiable, Hashable {
     let title: String
     let url: URL
+    var showsNavigation = false
     var id: String { url.absoluteString }
 }
 
 struct PolicyLinks: View {
-    enum Style: Equatable { case buttons, inline, accountRows }
+    enum Style: Equatable { case buttons, settings }
 
     var style: Style = .buttons
+    var navigate: ((PolicyDocument) -> Void)? = nil
     @EnvironmentObject private var api: APIClient
     @State private var document: PolicyDocument?
+
     var body: some View {
         Group {
             switch style {
-            case .buttons: PulsePlayerGlassGroup { linkLayout.buttonStyle(CompactActionStyle()) }
-            case .inline: PulsePlayerGlassGroup { linkLayout.buttonStyle(PressStyle()) }
-            case .accountRows:
-                VStack(alignment: .leading, spacing: 0) { links }.buttonStyle(PressStyle())
+            case .buttons:
+                PulsePlayerGlassGroup { linkLayout.buttonStyle(CompactActionStyle()) }
+            case .settings:
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 20) {
+                        website
+                        links
+                    }.fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: 0) {
+                        website
+                        linkLayout
+                    }
+                }
+                .buttonStyle(PressStyle())
+                .pulsePlayerKeepControlsTogether()
             }
-        }.sheet(item: $document) { PolicyBrowser(document: $0) }
+        }
+        .sheet(item: $document) { PolicyBrowser(document: $0) }
     }
+
+    private func open(_ target: PolicyDocument) {
+        if let navigate { navigate(target) } else { document = target }
+    }
+
+    @ViewBuilder private var website: some View {
+        if let url = api.configuration.websiteURL {
+            Button { open(PolicyDocument(title: "Official website", url: url, showsNavigation: true)) } label: {
+                HStack(spacing: 8) {
+                    Glyph(symbol: .link, size: 16, tint: PulsePlayerStyle.accent)
+                    LocalizedText("Official website").font(.capture(.subheadline, weight: .semibold))
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(PulsePlayerStyle.accent)
+                .padding(.horizontal, 14).frame(minHeight: 44)
+                .pulsePlayerGlass(in: Capsule(), fallback: PulsePlayerStyle.surface)
+                .contentShape(Capsule())
+            }
+            .accessibilityIdentifier("account.officialWebsite")
+        }
+    }
+
     private var linkLayout: some View {
-        let inline = style == .inline
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: inline ? 16 : 10) { links }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: style == .settings ? 20 : 10) { links }
                 .fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: inline ? 0 : 10) { links }
+            VStack(alignment: .leading, spacing: style == .settings ? 0 : 10) { links }
         }.font(.capture(.footnote, weight: .medium)).foregroundStyle(PulsePlayerStyle.accent)
     }
     @ViewBuilder private var links: some View {
@@ -130,17 +166,15 @@ struct PolicyLinks: View {
     }
 
     private func policyLink(_ title: String, url: URL) -> some View {
-        Button { document = PolicyDocument(title: title, url: url) } label: {
+        Button { open(PolicyDocument(title: title, url: url)) } label: {
             switch style {
-            case .accountRows:
-                AccountLinkLabel(title: title)
-            case .inline:
+            case .settings:
                 LocalizedText(title)
+                    .font(.capture(.footnote, weight: .semibold))
+                    .foregroundStyle(PulsePlayerStyle.accent)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12)
-                    .frame(minWidth: 44, minHeight: 44)
-                    .pulsePlayerGlass(in: Capsule())
-                    .contentShape(.interaction, Capsule())
+                    .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
             case .buttons:
                 LocalizedText(title)
                     .fixedSize(horizontal: false, vertical: true)
@@ -195,24 +229,37 @@ final class PolicyBrowserState: ObservableObject {
 struct PolicyBrowser: View {
     let document: PolicyDocument
     var webSearch = false
-    var showsNavigation = false
+    var pushed = false
     @Environment(\.dismiss) private var dismiss
     @StateObject private var state = PolicyBrowserState()
-    private var showsBrowserNavigation: Bool { webSearch || showsNavigation }
+    private var showsBrowserNavigation: Bool { webSearch || document.showsNavigation }
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeading(title: document.title) { dismiss() }
-            if showsBrowserNavigation {
-                HStack(spacing: 12) {
+            HStack(spacing: 12) {
+                if pushed {
+                    IconButton(symbol: .back, label: "Back", glass: true) { dismiss() }
+                        .accessibilityValue(Text(LocalizedStringKey(document.title)))
+                }
+                if showsBrowserNavigation && !pushed {
                     IconButton(symbol: .back, label: "Back", glass: true) { state.goBack() }
                         .disabled(!state.canGoBack)
-                    Text(verbatim: state.currentURL?.host ?? document.url.host ?? "")
-                        .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 0)
-                }.padding(.horizontal, 16).padding(.bottom, 8)
+                }
+                Text(verbatim: state.currentURL?.host ?? document.url.host ?? "")
+                    .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+                if !pushed {
+                    IconButton(symbol: .close, label: "Close", glass: true) { dismiss() }
+                        .accessibilityValue(Text(LocalizedStringKey(document.title)))
+                } else if showsBrowserNavigation && state.canGoBack {
+                    Button { state.goBack() } label: { LocalizedText("Back") }
+                        .buttonStyle(CompactActionStyle())
+                        .accessibilityValue(Text(verbatim: state.currentURL?.host ?? ""))
+                }
             }
+            .pulsePlayerKeepControlsTogether()
+            .pageHorizontalMargins().padding(.vertical, 6)
             ZStack {
                 PolicyWebView(url: document.url, state: state, webSearch: webSearch)
                     .accessibilityHidden(state.loading || state.error != nil)
@@ -340,50 +387,43 @@ struct PolicyWebView: UIViewRepresentable {
 }
 
 struct AccountSettingsSection: View {
-    @State private var websiteDocument: PolicyDocument?
     @AppStorage(AppLanguage.preferenceKey) private var languageCode = AppLanguage.defaultSelection
-    @State private var languagePicker = false
     @EnvironmentObject private var api: APIClient
-    @EnvironmentObject private var commerce: CommerceStore
     @EnvironmentObject private var ads: RewardedAds
-    @EnvironmentObject private var accountAccess: AccountAccessFlow
-    private var unavailable: Bool { accountAccess.isBusy || commerce.busy || commerce.preparingPurchase || ads.busy || ads.isPreparingAppOpen || ads.isPresenting }
-    private var hasPolicies: Bool { api.configuration.privacyURL != nil || api.configuration.termsURL != nil }
+    let unavailable: Bool
+    let openLanguage: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 8) {
             languagePreference
-            if hasPolicies || ads.privacyOptionsRequired {
-                VStack(alignment: .leading, spacing: 0) {
-                    if hasPolicies {
-                        LocalizedText("Privacy & terms").font(.capture(.footnote, weight: .semibold))
-                            .foregroundStyle(PulsePlayerStyle.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityAddTraits(.isHeader)
-                            .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 2)
-                        PolicyLinks(style: .accountRows)
-                    }
-                    if ads.privacyOptionsRequired {
-                        settingsLink("Advertising privacy") {
-                            Task { await ads.privacyOptions() }
-                        }
-                        .disabled(ads.isPreparingPrivacy)
-                        .accessibilityIdentifier("account.adPrivacy")
-                        if let message = ads.privacyOptionsError { ErrorNote(message: message).padding(12) }
-                    }
+            if ads.privacyOptionsRequired {
+                Button { Task { await ads.privacyOptions() } } label: {
+                    AccountLinkLabel(title: "Advertising privacy", symbol: .settings)
                 }
-                .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 14), interactive: false)
-                .disabled(unavailable)
+                .buttonStyle(PressStyle())
+                .disabled(unavailable || ads.isPreparingPrivacy)
+                .accessibilityIdentifier("account.adPrivacy")
+                if let message = ads.privacyOptionsError { ErrorNote(message: message) }
             }
-            settingsFooter
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 16) { metadata }.fixedSize(horizontal: true, vertical: false)
+                VStack(alignment: .leading, spacing: 4) { metadata }
+            }
+            .font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
+            .padding(.top, 6)
         }
-        .sheet(isPresented: $languagePicker) { LanguagePicker() }
-        .sheet(item: $websiteDocument) { PolicyBrowser(document: $0, showsNavigation: true) }
+    }
+
+    @ViewBuilder private var metadata: some View {
+        LocalizedText("Version %@", api.configuration.version)
+        if let id = api.session?.userId.value {
+            LocalizedText("ID · %@", id).monospacedDigit().textSelection(.enabled)
+        }
     }
 
     private var languagePreference: some View {
         let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
-        return Button { languagePicker = true } label: {
+        return Button(action: openLanguage) {
             HStack(spacing: 12) {
                 Glyph(symbol: .settings, size: 17, tint: PulsePlayerStyle.accent)
                     .frame(width: 30, height: 30)
@@ -411,28 +451,5 @@ struct AccountSettingsSection: View {
         }
         .buttonStyle(PressStyle())
         .accessibilityIdentifier("account.language")
-    }
-
-    private var settingsFooter: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let website = api.configuration.websiteURL {
-                settingsLink("Official website", symbol: .link) {
-                    websiteDocument = PolicyDocument(title: "Official website", url: website)
-                }
-                .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 14))
-                .disabled(unavailable).accessibilityIdentifier("account.officialWebsite")
-            }
-            LocalizedText("Version %@", api.configuration.version)
-                .font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12)
-        }
-    }
-
-    private func settingsLink(_ title: String, symbol: PulsePlayerGlyph? = nil, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            AccountLinkLabel(title: title, symbol: symbol)
-        }
-        .buttonStyle(PressStyle())
     }
 }

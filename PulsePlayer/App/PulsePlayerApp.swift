@@ -67,6 +67,7 @@ struct PulsePlayerStartupHost: View {
                 .accessibilityHidden(!finished)
             if !finished {
                 PulsePlayerStartupView()
+                    .allowsHitTesting(false)
                     .transition(.opacity)
                     .zIndex(1)
             }
@@ -93,10 +94,30 @@ struct PulsePlayerStartupHost: View {
 }
 
 struct PulsePlayerStartupView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var highlightPassed = false
     @State private var showsActivity = false
 
     var body: some View {
-        Image(decorative: "LaunchMark")
+        let mark = Image(decorative: "LaunchMark")
+        mark
+            .overlay {
+                if !reduceMotion {
+                    GeometryReader { bounds in
+                        let width = bounds.size.width
+                        LinearGradient(colors: [.clear, .white.opacity(0.65), .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: width * 0.34, height: bounds.size.height * 1.5)
+                            .rotationEffect(.degrees(16))
+                            .position(x: width * (highlightPassed ? 1.4 : -0.4),
+                                      y: bounds.size.height / 2)
+                    }
+                    .mask(mark)
+                    .opacity(scenePhase == .active ? 1 : 0)
+                    .allowsHitTesting(false)
+                }
+            }
             .overlay(alignment: .bottom) {
                 if showsActivity {
                     ProgressView()
@@ -109,19 +130,41 @@ struct PulsePlayerStartupView: View {
             .background(Color("StartupBackground").ignoresSafeArea(.container))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(LocalizedStringKey("PulsePlayer is starting"))
-            .task {
-                // A fast launch keeps the storyboard's still frame until the home view is ready.
-                do { try await Task.sleep(for: .milliseconds(450)) } catch { return }
+            .task(id: scenePhase) {
+                guard scenePhase == .active else { return }
+                if !highlightPassed {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.72)) {
+                        highlightPassed = true
+                    }
+                }
+                // Only a slower startup needs a loading indicator.
+                do { try await Task.sleep(for: .milliseconds(800)) } catch { return }
                 showsActivity = true
             }
     }
 }
 
 enum PulsePlayerTab: Int, Hashable {
-    case practice, files, settings
+    // SceneStorage persists these values across tab renames and reordering.
+    case files = 1
+    case search = 0
+    case settings = 2
 
-    var name: String { ["Practice", "Library", "Settings"][rawValue] }
-    var artwork: String { ["GlyphFold", "GlyphLibrary", "GlyphSettings"][rawValue] }
+    var name: String {
+        switch self {
+        case .files: "Library"
+        case .search: "Search"
+        case .settings: "Settings"
+        }
+    }
+
+    var glyph: PulsePlayerGlyph {
+        switch self {
+        case .files: .library
+        case .search: .search
+        case .settings: .settings
+        }
+    }
     var identifier: String { "tab.\(name.lowercased())" }
 }
 
@@ -132,7 +175,7 @@ private struct PulsePlayerTabItem: View {
         Label {
             Text(verbatim: L10n.display(tab.name, language: AppLanguage.from(locale)))
         } icon: {
-            Image(tab.artwork).renderingMode(.template)
+            Image(tab.glyph.assetName).renderingMode(.template)
         }
         .accessibilityLabel(Text(verbatim: L10n.text(tab.name, language: AppLanguage.from(locale))))
         .accessibilityIdentifier(tab.identifier)
@@ -181,14 +224,12 @@ private struct PresentationWindowMarker: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {}
 }
 
-private struct EditorPresentation: Identifiable {
-    let id = UUID()
-    let movie: PracticeRecording?
-    var tool: VideoTool = .studio
-}
-
 struct PulsePlayerRootView: View {
-    private enum LibraryDestination: Hashable { case tools, history }
+    private enum LibraryDestination: Hashable {
+        case tools, history, notebook, browse
+        case editor(UUID?, VideoTool)
+        case foldExport(FoldPracticeEntry)
+    }
 
     let startupFinished: Bool
     @EnvironmentObject private var api: APIClient
@@ -199,26 +240,26 @@ struct PulsePlayerRootView: View {
     @EnvironmentObject private var ads: RewardedAds
     @EnvironmentObject private var accountAccess: AccountAccessFlow
     @Environment(\.scenePhase) private var scenePhase
-    @SceneStorage("root.libraryTab") private var tab: PulsePlayerTab = .practice
-    @State private var editing: EditorPresentation?
+    @SceneStorage("root.libraryTab") private var tab: PulsePlayerTab = .files
+    @State private var settingsPath: [SettingsPage] = []
+    @State private var searchPath: [SearchPage] = []
     @State private var importing = false
     @State private var libraryFilter = "Fold notes"
     @State private var libraryFolderID: UUID?
     @State private var libraryPath: [LibraryDestination] = []
     @State private var showingPlus = false
-    @State private var showingLessons = false
-    @State private var returnToLessonEntry = false
     @State private var loginLanding: LoginLandingLink?
     @StateObject private var presentationWindow = RootPresentationWindow()
-    @State private var deskEngaged = false
+    @State private var searchEngaged = false
     @State private var libraryEngaged = false
 
     private var availableLoginLanding: LoginLandingLink? {
         guard startupFinished, scenePhase == .active, !ads.isPresenting,
               !ads.isPreparingAppOpen, !ads.isPreparingPrivacy, !accountAccess.isBusy,
-              !commerce.busy, !commerce.preparingPurchase, editing == nil,
-              !importing, !showingPlus, !showingLessons, loginLanding == nil,
-              !(tab == .practice && deskEngaged),
+              !commerce.busy, !commerce.preparingPurchase,
+              !importing, !showingPlus, loginLanding == nil,
+              !(tab == .search && (searchEngaged || !searchPath.isEmpty)),
+              !(tab == .settings && !settingsPath.isEmpty),
               !(tab == .files && (libraryEngaged || !libraryPath.isEmpty)),
               let link = api.pendingLoginLanding, api.session?.userId.value == link.owner else { return nil }
         return link
@@ -226,39 +267,36 @@ struct PulsePlayerRootView: View {
 
     var body: some View {
         TabView(selection: $tab) {
-            FoldingDeskView(openPlus: openPlus, browseVideos: browseVideos, importing: $importing, engaged: $deskEngaged)
-                .pulsePlayerTab(.practice)
             filesTab.pulsePlayerTab(.files)
-            AccountView(openFavorites: { openFiles("Saved") }, openHistory: openHistory,
-                        openFolders: { openFiles("Folders") })
-                .pulsePlayerTab(.settings)
+            NavigationStack(path: $searchPath) {
+                LessonSearchPage(openPlus: openPlus, importing: $importing,
+                                 engaged: $searchEngaged, path: $searchPath)
+                    .toolbar(.hidden, for: .navigationBar)
+            }
+            .pulsePlayerTab(.search)
+            NavigationStack(path: $settingsPath) {
+                AccountView(openFavorites: { openFiles("Saved") }, openFolders: { openFiles("Folders") },
+                            openSearch: showLinkEntry, path: $settingsPath)
+                    .toolbar(.hidden, for: .navigationBar)
+            }
+            .pulsePlayerTab(.settings)
         }
             .disabled(importing)
             .background { PresentationWindowMarker(owner: presentationWindow).allowsHitTesting(false).accessibilityHidden(true) }
             .tint(PulsePlayerStyle.accent)
             .foregroundStyle(PulsePlayerStyle.paper)
-            .sheet(item: $editing) { EditorSheet(initialMovie: $0.movie, initialTool: $0.tool) }
             .fullScreenCover(isPresented: $showingPlus) { MembershipView() }
             .fullScreenCover(item: $loginLanding) { link in
                 LoginLandingView(link: link)
             }
-            .fullScreenCover(isPresented: $showingLessons, onDismiss: {
-                if returnToLessonEntry {
-                    returnToLessonEntry = false
-                    tab = .practice
-                }
-            }) {
-                BrowseVideoListView(returnToLinkInput: {
-                    returnToLessonEntry = true
-                    showingLessons = false
-                })
-            }
             .overlay(alignment: .top) {
-                if !showingLessons { DownloadCompletionNotice().padding(.top, 8) }
+                if !isBrowsing { DownloadCompletionNotice().padding(.top, 8) }
             }
             .onChange(of: library.listRequest) { _, request in
                 if let request {
                     loginLanding = nil
+                    searchPath.removeAll()
+                    settingsPath.removeAll()
                     openFiles(request.list.filter, folderID: request.list.folderID)
                 }
             }
@@ -298,21 +336,34 @@ struct PulsePlayerRootView: View {
 
     private var filesTab: some View {
         NavigationStack(path: $libraryPath) {
-            LibraryView(edit: { editing = EditorPresentation(movie: $0) },
-                        browseVideos: browseVideos,
-                        openEditor: { editing = EditorPresentation(movie: nil) },
-                        openTools: { libraryPath = [.tools] },
+            LibraryView(edit: { libraryPath.append(.editor($0.id, .studio)) },
+                        browseVideos: { libraryPath.append(.browse) },
+                        openEditor: { libraryPath.append(.editor(nil, .studio)) },
+                        openSearch: showLinkEntry,
+                        openTools: { libraryPath = [.tools] }, openNotebook: { libraryPath.append(.notebook) },
                         openPlus: openPlus, openHistory: openHistory,
                         filter: $libraryFilter, importing: $importing, engaged: $libraryEngaged, selectedFolderID: $libraryFolderID)
                 .toolbar(.hidden, for: .navigationBar)
                 .navigationDestination(for: LibraryDestination.self) { destination in
                     switch destination {
+                    case .browse:
+                        BrowseVideoListView(returnToLinkInput: showLinkEntry)
+                            .toolbar(.hidden, for: .navigationBar, .tabBar)
                     case .tools:
-                        ToolsView(openPlus: openPlus)
+                        ToolsView(openPlus: openPlus, edit: { movie, tool in libraryPath.append(.editor(movie.id, tool)) })
                             .toolbar(.hidden, for: .navigationBar)
+                    case .notebook:
+                        FoldNotebookView(openExport: { libraryPath.append(.foldExport($0)) })
+                            .toolbar(.hidden, for: .navigationBar, .tabBar)
+                    case .foldExport(let entry):
+                        FoldClipExportView(entry: entry)
+                            .toolbar(.hidden, for: .navigationBar, .tabBar)
+                    case .editor(let id, let tool):
+                        EditorSheet(initialMovie: library.movies.first { $0.id == id }, initialTool: tool, pushed: true)
+                            .toolbar(.hidden, for: .navigationBar, .tabBar)
                     case .history:
-                        VideoHistoryView(edit: { editing = EditorPresentation(movie: $0) },
-                                         review: { editing = EditorPresentation(movie: $0, tool: .ranges) })
+                        VideoHistoryView(browseVideos: { libraryPath.append(.browse) }, edit: { libraryPath.append(.editor($0.id, .studio)) },
+                                         review: { libraryPath.append(.editor($0.id, .ranges)) })
                             .toolbar(.hidden, for: .navigationBar)
                     }
                 }
@@ -333,7 +384,20 @@ struct PulsePlayerRootView: View {
 
     private func openPlus() { showingPlus = true }
 
-    private func browseVideos() { showingLessons = true }
+    private var isBrowsing: Bool {
+        switch tab {
+        case .files: libraryPath.last == .browse
+        case .search: searchPath.last == .browse
+        case .settings: settingsPath.last == .browse
+        }
+    }
+
+    private func showLinkEntry() {
+        if tab == .files, libraryPath.last == .browse { libraryPath.removeLast() }
+        if tab == .settings, settingsPath.last == .browse { settingsPath.removeLast() }
+        searchPath.removeAll()
+        tab = .search
+    }
 
 }
 

@@ -154,6 +154,7 @@ struct DiscoverView: View {
         }.pulsePlayerScreenBackground(showsPlayback ? PulsePlayerStyle.mediaBackdrop : PulsePlayerStyle.background)
             .foregroundStyle(PulsePlayerStyle.paper)
             .preferredColorScheme(showsPlayback ? .dark : .light)
+            .statusBarHidden(showsPlayback)
             .modifier(PlayerPagingAccess(entries: displayEntries, selectedID: $activeID, tailID: morePageID, players: players))
             .onChange(of: library.listRequest) { _, request in
                 if request != nil { players.releaseAll(); if canDismiss { dismiss() } }
@@ -191,7 +192,7 @@ struct DiscoverView: View {
                     if let playback = players.controllers[entry.id] {
                         ClipPage(clip: clip, active: activeID == entry.id,
                                  gesture: .forVideo(entry.id, in: feed.entries), safeInsets: insets,
-                                 hasExitButton: exit != nil, playback: playback, replaceMedia: feed.replaceMedia,
+                                 playback: playback, replaceMedia: feed.replaceMedia,
                                  didStartPlaying: { players.prepareNext(after: entry.id) },
                                  didStopPlaying: { if activeID == entry.id { players.suspend() } },
                                  onSwipeExit: exitPlayer)
@@ -246,7 +247,8 @@ struct DiscoverView: View {
             } else if empty {
                 let request = feed.emptySearch
                 VStack(alignment: .leading, spacing: 14) {
-                    EmptyStateScene(title: request == nil ? "No videos available" : "No matching video",
+                    EmptyStateScene(appearance: request == nil ? .screening(.feed) : .inline(.search),
+                                    title: request == nil ? "No videos available" : "No matching video",
                                     message: request == nil ? nil : "Check the link and try again.")
                     if request == nil {
                         EmptyStateAction(title: "Try again", symbol: .feed, primary: true) {
@@ -329,7 +331,7 @@ struct PlayerScreen: View {
                 VStack(spacing: 0) {
                     PlayerHeader(exit: exitPlayer)
                     ScenePage { _ in
-                        EmptyStateScene(title: "Playback unavailable",
+                        EmptyStateScene(appearance: .screening(.feed), title: "Playback unavailable",
                                         message: "This video file is missing or unreadable. Open it again or download a new copy.")
                     }
                 }
@@ -339,6 +341,7 @@ struct PlayerScreen: View {
         }.pulsePlayerScreenBackground(entries.isEmpty ? PulsePlayerStyle.background : PulsePlayerStyle.mediaBackdrop)
             .foregroundStyle(PulsePlayerStyle.paper)
             .preferredColorScheme(entries.isEmpty ? .light : .dark)
+            .statusBarHidden(!entries.isEmpty)
             .onChange(of: library.listRequest) { _, request in if request != nil { exitPlayer() } }
             .onChange(of: api.offlineOwnerID) { previous, current in
                 if previous != nil, previous != current, route.clips.contains(where: { $0.localMovieID == nil }) {
@@ -389,7 +392,7 @@ struct PlayerScreen: View {
                     if let playback = players.controllers[entry.id] {
                         ClipPage(clip: clip, active: activeID == entry.id,
                                  gesture: .forVideo(entry.id, in: entries), safeInsets: insets,
-                                 hasExitButton: true, playback: playback, replaceMedia: feed.replaceMedia,
+                                 playback: playback, replaceMedia: feed.replaceMedia,
                                  didStartPlaying: { players.prepareNext(after: entry.id) },
                                  didStopPlaying: { if activeID == entry.id { players.suspend() } },
                                  onSwipeExit: exitPlayer,
@@ -444,12 +447,14 @@ private extension View {
     }
 }
 
+private enum PlayerDisplayPreference {
+    static let fillKey = "pulseplayer.video.fillsScreen"
+}
+
 private enum PlayerTopControls {
     static let buttonSize: CGFloat = 44
     static let topInset: CGFloat = 8
     static let edgeInset: CGFloat = 12
-    static let spacing: CGFloat = 8
-    static let adjacentOffset = buttonSize + spacing
 }
 
 private struct PlaybackPager<Pages: View>: View {
@@ -815,21 +820,26 @@ struct AllowanceLimitPrompt: View {
 }
 
 private enum PlayerGesture: Equatable {
-    case swipeUp, swipeDown, tapForControls
+    case next(LessonClip), previous(LessonClip), tapForControls
 
     static let swipeHintKey = "foldot.player.completedSwipeHint.v7"
 
     static func forVideo(_ id: String, in entries: [PlaybackQueueEntry]) -> Self {
-        guard entries.count > 1 else { return .tapForControls }
-        return entries.last?.id == id ? .swipeDown : .swipeUp
+        guard entries.count > 1, let index = entries.firstIndex(where: { $0.id == id }) else { return .tapForControls }
+        return index + 1 < entries.count ? .next(entries[index + 1].clip) : .previous(entries[index - 1].clip)
     }
 
-    var isSwipe: Bool { self != .tapForControls }
-
-    var title: String {
+    var neighbor: LessonClip? {
         switch self {
-        case .swipeUp: "Swipe up for the next video"
-        case .swipeDown: "Swipe down for the previous video"
+        case .next(let clip), .previous(let clip): clip
+        case .tapForControls: nil
+        }
+    }
+
+    var instruction: String {
+        switch self {
+        case .next: "Swipe up"
+        case .previous: "Swipe down"
         case .tapForControls: "Tap the video to show or hide controls"
         }
     }
@@ -842,73 +852,76 @@ private struct PlayerGestureHint: View {
     @AppStorage("foldot.player.completedControlsHint.v1") private var completedControls = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showing = false
+    @State private var moved = false
 
     var body: some View {
-        let available = eligible && !completedSwipe && (gesture.isSwipe || !completedControls)
-        let showsHint = available && showing
-        ZStack {
-            if showsHint {
+        let available = eligible && !completedSwipe && (gesture.neighbor != nil || !completedControls)
+        Group {
+            if available && showing {
                 HStack(spacing: 10) {
-                    PlayerGestureArtwork(gesture: gesture)
-                    LocalizedText(gesture.title)
-                        .font(.capture(gesture.isSwipe ? .subheadline : .caption, weight: .semibold))
-                        .foregroundStyle(PulsePlayerStyle.onDark)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if let neighbor = gesture.neighbor {
+                        ZStack(alignment: .bottomTrailing) {
+                            Group {
+                                if neighbor.playbackURL.isFileURL {
+                                    VideoFileThumbnail(url: neighbor.playbackURL, maximumSize: 120, fallbackCover: neighbor.coverURL)
+                                } else {
+                                    MediaCover(url: neighbor.coverURL, onMedia: true)
+                                }
+                            }
+                            .frame(width: 42, height: 52)
+                            .clipShape(.rect(cornerRadius: 8))
+                            Glyph(symbol: .back, size: 11, tint: PulsePlayerStyle.mediaBackdrop)
+                                .rotationEffect(.degrees(direction < 0 ? 90 : -90))
+                                .frame(width: 20, height: 20)
+                                .background(PulsePlayerStyle.mediaAccent, in: Circle())
+                        }
+                        .offset(y: moved && !reduceMotion ? direction * 5 : 0)
+                    } else {
+                        Glyph(symbol: .play, size: 18, tint: PulsePlayerStyle.mediaAccent)
+                            .frame(width: 36, height: 36)
+                            .scaleEffect(moved && !reduceMotion ? 0.85 : 1)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        LocalizedText(gesture.instruction)
+                            .font(.capture(.subheadline, weight: .semibold))
+                        if let neighbor = gesture.neighbor {
+                            Text(verbatim: neighbor.title).font(.capture(.caption)).lineLimit(2)
+                                .foregroundStyle(PulsePlayerStyle.mediaSecondary)
+                        }
+                    }
                 }
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 16), tint: PulsePlayerStyle.mediaBackdrop.opacity(0.82),
-                            fallback: PulsePlayerStyle.mediaSurface, interactive: false, onDark: true)
-                .frame(maxWidth: 320)
-                .padding(.horizontal, 12).padding(.bottom, 16)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(10)
+                .foregroundStyle(PulsePlayerStyle.onDark)
+                .pulsePlayerGlass(in: .rect(cornerRadius: 16), tint: PulsePlayerStyle.mediaBackdrop.opacity(0.78),
+                                  fallback: PulsePlayerStyle.mediaSurface, interactive: false, onDark: true)
+                .frame(maxWidth: 242, alignment: .leading)
+                .accessibilityElement(children: .combine)
                 .transition(.opacity)
             }
         }
         .allowsHitTesting(false)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: showsHint)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: showing)
         .task(id: available ? gesture : nil) {
             showing = false
+            moved = false
             guard available else { return }
             do {
-                try await Task.sleep(for: .milliseconds(400))
+                try await Task.sleep(for: .milliseconds(450))
                 try Task.checkCancellation()
                 showing = true
-                try await Task.sleep(for: .seconds(6))
+                try await Task.sleep(for: .milliseconds(200))
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.7).repeatCount(4, autoreverses: true)) { moved = true }
+                try await Task.sleep(for: .seconds(5))
                 try Task.checkCancellation()
+                if gesture.neighbor != nil { completedSwipe = true } else { completedControls = true }
             } catch { return }
-            showing = false
-            if gesture.isSwipe { completedSwipe = true }
-            else { completedControls = true }
         }
     }
-}
 
-private struct PlayerGestureArtwork: View {
-    let gesture: PlayerGesture
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var demonstrating = false
-
-    var body: some View {
-        let moved = demonstrating && !reduceMotion
-        Group {
-            if gesture.isSwipe {
-                let up = gesture == .swipeUp
-                TintedArtwork(name: PulsePlayerGlyph.back.assetName, tint: PulsePlayerStyle.onDark)
-                    .frame(width: 22, height: 22)
-                    .rotationEffect(.degrees(up ? 90 : -90))
-                    .offset(y: moved ? (up ? -5 : 5) : (up ? 5 : -5))
-            } else {
-                TintedArtwork(name: "PlayerMore", tint: PulsePlayerStyle.onDark)
-                    .frame(width: 20, height: 20)
-                    .scaleEffect(moved ? 0.84 : 1)
-            }
-        }
-        .frame(width: 24, height: 32)
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 0.65).repeatCount(4, autoreverses: true)) {
-                demonstrating = true
-            }
-        }
+    private var direction: CGFloat {
+        if case .next = gesture { return -1 }
+        return 1
     }
 }
 
@@ -939,7 +952,6 @@ private struct ClipPage: View {
     let active: Bool
     let gesture: PlayerGesture
     let safeInsets: EdgeInsets
-    let hasExitButton: Bool
     @ObservedObject var playback: PlaybackController
     let replaceMedia: (LessonClip) -> Void
     var didStartPlaying: () -> Void = {}
@@ -966,6 +978,7 @@ private struct ClipPage: View {
     @State private var allowed = false
     @State private var scrubbing = false
     @GestureState private var draggingDock = false
+    @AppStorage(PlayerDisplayPreference.fillKey) private var fillsScreen = true
     @State private var controlsHidden = false
     @State private var controlsActivity = 0
     @State private var dockContentHeight: CGFloat = 136
@@ -1144,8 +1157,8 @@ private struct ClipPage: View {
             .sheet(item: $options, onDismiss: finishOptions) { selection in
                 playbackOptions(selection)
             }
-            .sheet(item: $presentedSource, onDismiss: resumeAfterControls) { channel in
-                ChannelView(route: channel).preferredColorScheme(.light)
+            .fullScreenCover(item: $presentedSource, onDismiss: resumeAfterControls) { channel in
+                ChannelBrowser(route: channel).preferredColorScheme(.light)
             }
             .sheet(isPresented: $editor, onDismiss: resumeAfterControls) {
                 EditorSheet(initialMovie: localMovie).preferredColorScheme(.light)
@@ -1154,54 +1167,54 @@ private struct ClipPage: View {
     private var playerViewport: some View {
         GeometryReader { viewport in
             let regions = playbackAreas(in: viewport)
-            let stage = safeControls(in: regions.media, viewport: viewport)
-            let otherPane = regions.dock.map { safeControls(in: $0, viewport: viewport) }
-            let frames = practiceFrames(stage: stage, otherPane: otherPane)
+            let media = regions.media
+            let stage = safeControls(in: media, viewport: viewport)
+            let controls = regions.dock.map { safeControls(in: $0, viewport: viewport) } ?? stage
+            let topPadding = PlayerTopControls.topInset
+            let dockHeight = min(dockContentHeight, max(0, controls.height - topPadding - 68))
+            let hintHeight = max(0, stage.height - 68 - (regions.dock == nil && !controlsAreHidden ? dockHeight + 8 : 0))
+            let hintArea = CGRect(x: stage.minX, y: stage.minY + 68, width: stage.width, height: hintHeight)
             ZStack(alignment: .topLeading) {
                 if active {
-                    videoStage.inPlaybackFrame(frames.video, direction: layoutDirection)
-                    playbackOverlay.inPlaybackFrame(frames.video, direction: layoutDirection, alignment: .center)
-                    PlayerGestureHint(eligible: canHideControls, gesture: gesture)
-                        .inPlaybackFrame(frames.video, direction: layoutDirection, alignment: .bottom)
-                    if controlsAreHidden {
-                        showControlsButton(in: stage, viewportWidth: viewport.size.width)
-                    } else {
-                        let height = min(dockContentHeight, max(0, frames.tools.height - 28))
-                        playbackDock(height: height, width: frames.tools.width)
-                            .inPlaybackFrame(frames.tools, direction: layoutDirection, alignment: .center)
+                    videoStage.inPlaybackFrame(media, direction: layoutDirection)
+                    if !controlsAreHidden {
+                        playbackDock(height: dockHeight, bottomInset: max(0, (regions.dock ?? media).maxY - controls.maxY))
+                            .inPlaybackFrame(controls, direction: layoutDirection, alignment: .bottom)
+                    }
+                    Group {
+                        if controlsAreHidden {
+                            showControlsButton
+                        } else {
+                            lessonSettings
+                                .pulsePlayerGlass(in: Capsule(), tint: Self.panelTint,
+                                                  fallback: PulsePlayerStyle.mediaSurface, interactive: false, onDark: true)
+                        }
+                    }
+                    .padding(.top, topPadding)
+                    .padding(.trailing, PlayerTopControls.edgeInset)
+                    .inPlaybackFrame(controls, direction: layoutDirection, alignment: .topTrailing)
+
+                    if hintArea.height >= 76 {
+                        PlayerGestureHint(eligible: canHideControls, gesture: gesture)
+                            .padding(.horizontal, 14)
+                            .inPlaybackFrame(hintArea, direction: layoutDirection, alignment: .leading)
+                    }
+                    if controlsAreHidden && playback.isLoading {
+                        PlayerLoadingFeedback(buffering: true, floating: true)
+                            .inPlaybackFrame(stage, direction: layoutDirection)
+                            .allowsHitTesting(false)
                     }
                 } else {
-                    PlayerPoster(url: clip.coverURL).inPlaybackFrame(stage, direction: layoutDirection)
+                    PlayerPoster(url: clip.coverURL).inPlaybackFrame(media, direction: layoutDirection)
                 }
             }
         }
     }
 
-    private func practiceFrames(stage: CGRect, otherPane: CGRect?) -> (video: CGRect, tools: CGRect) {
-        if let otherPane { return (stage, otherPane) }
-        if controlsAreHidden { return (stage, .zero) }
-        if stage.width >= 540, stage.width > stage.height * 1.2 {
-            let sidebar = min(stage.width * 0.45, typeSize.isAccessibilitySize ? 380 : 320)
-            let edge: CGRectEdge = layoutDirection == .rightToLeft ? .minXEdge : .maxXEdge
-            let parts = stage.divided(atDistance: sidebar, from: edge)
-            return (parts.remainder, parts.slice)
-        }
-        // Keep the complete sheet of paper visible. A portrait recording needs more
-        // vertical space than a wide overhead shot, even on the same phone.
-        let picture = playback.presentationSize
-        let naturalHeight = picture.width > 0 && picture.height > 0
-            ? stage.width * picture.height / picture.width : stage.height * 0.55
-        let minimumVideo = stage.height * (typeSize.isAccessibilitySize ? 0.42 : 0.5)
-        let videoGoal = min(max(naturalHeight, minimumVideo), stage.height * 0.72)
-        let height = min(dockContentHeight + 28, max(0, stage.height - videoGoal))
-        let parts = stage.divided(atDistance: height, from: .maxYEdge)
-        return (parts.remainder, parts.slice)
-    }
-
     private var videoStage: some View {
         ZStack {
             PulsePlayerStyle.mediaBackdrop
-            VideoSurface(player: playback.player, fill: false, onReadyForDisplay: { firstFrameReady = $0 })
+            VideoSurface(player: playback.player, fill: fillsScreen, onReadyForDisplay: { firstFrameReady = $0 })
                 .opacity(allowed ? 1 : 0)
                 .allowsHitTesting(false)
             if !allowed || !firstFrameReady {
@@ -1230,33 +1243,8 @@ private struct ClipPage: View {
         onSwipeExit()
     }
 
-    @ViewBuilder private var playbackOverlay: some View {
-        if showsPlaybackFeedback, allowed, let error = playback.error {
-            ViewThatFits(in: .vertical) {
-                playbackFailure(error)
-                ScrollView { playbackFailure(error) }
-                    .scrollBounceBehavior(.basedOnSize)
-            }
-            .padding(.horizontal, 12).padding(.top, 52).padding(.bottom, 8)
-            .frame(maxWidth: 420)
-        } else if controlsAreHidden && playback.isLoading {
-            PlayerLoadingFeedback(buffering: true, floating: true)
-                .allowsHitTesting(false)
-        }
-    }
-
-    private func showControlsButton(in area: CGRect, viewportWidth: CGFloat) -> some View {
+    private var showControlsButton: some View {
         let size = PlayerTopControls.buttonSize
-        let edge = PlayerTopControls.edgeInset
-        let top = PlayerTopControls.topInset
-        let spacing = PlayerTopControls.adjacentOffset
-        let rightToLeft = layoutDirection == .rightToLeft
-        let exitX = rightToLeft ? safeInsets.trailing + edge : viewportWidth - safeInsets.trailing - edge - size
-        let moreX = rightToLeft ? area.minX + edge : area.maxX - edge - size
-        let exit = CGRect(x: exitX, y: safeInsets.top + top, width: size, height: size)
-        let more = CGRect(x: moreX, y: area.minY + top, width: size, height: size)
-        let sharesCorner = hasExitButton && more.intersects(exit)
-        let fitsBesideExit = area.width >= 2 * edge + size + spacing
         return Button { setControlsHidden(false) } label: {
             TintedArtwork(name: "PlayerMore", tint: PulsePlayerStyle.onDark)
                 .frame(width: 20, height: 20)
@@ -1268,9 +1256,6 @@ private struct ClipPage: View {
         .buttonStyle(PressStyle())
         .accessibilityLabel(LocalizedStringKey("Show playback controls"))
         .accessibilityIdentifier("player.showControls")
-        .inPlaybackFrame(CGRect(x: moreX + (sharesCorner && fitsBesideExit ? (rightToLeft ? spacing : -spacing) : 0),
-                                y: more.minY + (sharesCorner && !fitsBesideExit ? spacing : 0),
-                                width: size, height: size), direction: layoutDirection)
     }
 
     private func setControlsHidden(_ hidden: Bool) {
@@ -1304,9 +1289,9 @@ private struct ClipPage: View {
         if !Task.isCancelled { activate(reload: true) }
     }
 
-    private func playbackDock(height: CGFloat, width: CGFloat) -> some View {
+    private func playbackDock(height: CGFloat, bottomInset: CGFloat) -> some View {
         ScrollView {
-            dockContent(narrow: width < 360 || typeSize.isAccessibilitySize)
+            dockContent
                 .onGeometryChange(for: CGFloat.self, of: { $0.size.height.rounded(.up) }) {
                     dockContentHeight = $0
                 }
@@ -1314,35 +1299,58 @@ private struct ClipPage: View {
         .frame(height: height)
         .scrollDisabled(dockContentHeight <= height)
         .scrollBounceBehavior(.basedOnSize)
+        .scrollIndicators(.hidden)
         .simultaneousGesture(DragGesture(minimumDistance: 8).updating($draggingDock) { value, dragging, _ in
             if dockContentHeight > height, abs(value.translation.height) > abs(value.translation.width) {
                 dragging = true
             }
         })
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .frame(maxWidth: 620)
-        .foregroundStyle(PulsePlayerStyle.onDark)
-        .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: Self.panelCornerRadius), tint: Self.panelTint,
-                    fallback: PulsePlayerStyle.mediaSurface, interactive: false, onDark: true)
-        .padding(.horizontal, 10).padding(.vertical, 6)
+        .padding(.horizontal, 16).padding(.bottom, 8)
+        .frame(maxWidth: 680)
         .frame(maxWidth: .infinity)
+        .foregroundStyle(PulsePlayerStyle.onDark)
+        .background {
+            LinearGradient(stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .black.opacity(0.67), location: 0.26),
+                .init(color: .black.opacity(0.88), location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+            .padding(.top, -48).padding(.bottom, -bottomInset)
+            .allowsHitTesting(false)
+        }
     }
 
-    private func dockContent(narrow: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+    private var dockContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
             playbackFeedback
-            if playback.error == nil { transport(narrow: narrow) }
             PlaybackFoldNavigation(videoTitle: clip.title, identity: foldID,
                                    enabled: canControlPlayback && playback.error == nil, jump: jumpToFold)
-                .padding(.horizontal, 4)
+            if playback.error == nil {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) {
+                        transportButtons.fixedSize()
+                        timelineControl.frame(minWidth: 115)
+                    }
+                    VStack(alignment: .leading, spacing: 0) {
+                        timelineControl
+                        transportButtons
+                    }
+                }
+            }
             if let foldID {
                 FoldPracticeControls(clip: foldSource, identity: foldID, playback: playback,
                                      enabled: canControlPlayback, didInteract: { controlsActivity += 1 },
+                                     resumePlayback: resumePlayback,
                                      showSteps: { showOptions(.folds) })
             }
-            Divider().overlay(PulsePlayerStyle.onDark.opacity(0.12))
-            lessonSettings
         }
+    }
+
+    private var timelineControl: some View {
+        PlayerProgressControl(playback: playback, timeline: playback.timeline,
+                              enabled: canControlPlayback, canResume: canControlPlayback,
+                              scrubbing: $scrubbing, tint: PulsePlayerStyle.mediaAccent,
+                              showsTimecodes: true, onMedia: true, resumePlayback: resumePlayback)
     }
 
     private func jumpToFold(_ id: FoldPracticeID, stepID: UUID) throws {
@@ -1426,62 +1434,48 @@ private struct ClipPage: View {
         }
     }
 
-    private func transport(narrow: Bool) -> some View {
-        let layout = narrow ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
-                            : AnyLayout(HStackLayout(alignment: .center, spacing: 10))
-        return layout {
-            HStack(spacing: 2) {
-                if localIdentity != nil { skipButton(seconds: -10) }
-                Button(action: togglePlayback) {
-                    Glyph(symbol: playback.intendsPlayback ? .pause : .play, size: 19,
-                          tint: PulsePlayerStyle.mediaBackdrop)
-                        .frame(width: 44, height: 44)
-                        .background(PulsePlayerStyle.mediaAccent, in: Circle())
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PressStyle())
-                .accessibilityLabel(LocalizedStringKey(playback.intendsPlayback ? "Pause video" : "Play video"))
-                .accessibilityIdentifier("player.playPause")
-                .disabled(!canControlPlayback || playback.error != nil)
-                if localIdentity != nil { skipButton(seconds: 10) }
+    private var transportButtons: some View {
+        HStack(spacing: 2) {
+            if localIdentity != nil { skipButton(seconds: -10) }
+            Button(action: togglePlayback) {
+                Glyph(symbol: playback.intendsPlayback ? .pause : .play, size: 19,
+                      tint: PulsePlayerStyle.mediaBackdrop)
+                    .frame(width: 44, height: 44)
+                    .background(PulsePlayerStyle.mediaAccent, in: Circle())
+                    .contentShape(Rectangle())
             }
-            PlayerProgressControl(playback: playback, timeline: playback.timeline,
-                                  enabled: canControlPlayback, canResume: canControlPlayback,
-                                  scrubbing: $scrubbing, tint: PulsePlayerStyle.mediaAccent,
-                                  showsTimecodes: true, onMedia: true, resumePlayback: resumePlayback)
-                .frame(maxWidth: .infinity)
+            .buttonStyle(PressStyle())
+            .accessibilityLabel(LocalizedStringKey(playback.intendsPlayback ? "Pause video" : "Play video"))
+            .accessibilityIdentifier("player.playPause")
+            .disabled(!canControlPlayback || playback.error != nil)
+            if localIdentity != nil { skipButton(seconds: 10) }
         }
     }
 
     private var lessonSettings: some View {
         let controls = Group {
             Button { showOptions(.speed) } label: {
-                HStack(spacing: 5) {
-                    LocalizedText("Speed")
-                    Text(verbatim: rateText(playback.speed)).monospacedDigit()
-                }
+                Text(verbatim: rateText(playback.speed)).monospacedDigit()
             }
+            .accessibilityLabel(LocalizedStringKey("Speed"))
+            .accessibilityValue(Text(verbatim: rateText(playback.speed)))
             .accessibilityIdentifier("player.speed")
             Button {
                 controlsActivity += 1
                 playback.setMuted(!playback.muted)
             } label: {
-                HStack(spacing: 5) {
-                    Glyph(symbol: playback.muted ? .mute : .sound, size: 15, tint: PulsePlayerStyle.onDark)
-                    LocalizedText(playback.muted ? "Unmute" : "Mute")
-                }
+                Glyph(symbol: playback.muted ? .mute : .sound, size: 18, tint: PulsePlayerStyle.onDark)
             }
+            .accessibilityLabel(LocalizedStringKey(playback.muted ? "Unmute" : "Mute"))
             .accessibilityIdentifier("player.mute")
             Button { showOptions(.more) } label: {
-                HStack(spacing: 5) {
-                    TintedArtwork(name: "PlayerMore", tint: PulsePlayerStyle.onDark).frame(width: 15, height: 15)
-                    LocalizedText("Video tools")
-                }
+                TintedArtwork(name: "PlayerMore", tint: PulsePlayerStyle.onDark).frame(width: 18, height: 18)
             }
+            .accessibilityLabel(LocalizedStringKey("Video tools"))
             .accessibilityIdentifier("player.videoTools")
         }
         return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) { controls }.fixedSize(horizontal: true, vertical: false)
+            HStack(spacing: 2) { controls }.fixedSize(horizontal: true, vertical: false)
             VStack(alignment: .leading, spacing: 0) { controls }
         }
         .buttonStyle(PlaybackUtilityStyle())
@@ -1510,7 +1504,9 @@ private struct ClipPage: View {
 
     @ViewBuilder private var playbackFeedback: some View {
         if showsPlaybackFeedback {
-            if accessChecked && !allowed {
+            if allowed, let error = playback.error {
+                playbackFailure(error)
+            } else if accessChecked && !allowed {
                 let limitReached = quota.canRequestReward(for: .watch, premium: commerce.premium)
                 VStack(alignment: .leading, spacing: 4) {
                     LocalizedText(limitReached ? "Daily view limit reached" : "Playback unavailable")
@@ -1633,7 +1629,7 @@ private struct ClipPage: View {
         case .more: title = "Video tools"
         case .folds: title = "Fold notes"
         }
-        return playerMenuSheet(title, close: { options = nil }) {
+        return playerMenuSheet(title, showsPreview: selection == .more, close: { options = nil }) {
             if selection == .folds, let foldID {
                 FoldPracticePanel(identity: foldID, playback: playback) { play in
                     resumeAfterSheet = play
@@ -1648,15 +1644,12 @@ private struct ClipPage: View {
     }
 
     private func playerMenuSheet<Content: View>(
-        _ title: String, close: @escaping () -> Void, @ViewBuilder content: () -> Content
+        _ title: String, showsPreview: Bool, close: @escaping () -> Void, @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                LocalizedText(title)
-                    .font(.capture(.title3, weight: .semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityAddTraits(.isHeader)
+                if showsPreview { toolsPreview }
+                Spacer(minLength: 0)
                 Button(action: close) {
                     Glyph(symbol: .close, size: 14, tint: PulsePlayerStyle.onDark)
                         .frame(width: 32, height: 32)
@@ -1666,6 +1659,7 @@ private struct ClipPage: View {
                 }
                 .buttonStyle(PressStyle())
                 .accessibilityLabel(LocalizedStringKey("Close"))
+                .accessibilityValue(Text(LocalizedStringKey(title)))
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
@@ -1682,7 +1676,7 @@ private struct ClipPage: View {
         .padding(.top, 12)
         .foregroundStyle(PulsePlayerStyle.onDark)
         .preferredColorScheme(.dark)
-        .presentationDetents([.medium, .large])
+        .presentationDetents(showsPreview ? [.fraction(0.7), .large] : [.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(Self.panelCornerRadius)
         .presentationBackground {
@@ -1712,8 +1706,14 @@ private struct ClipPage: View {
                         .font(.capture(.subheadline, weight: .semibold)).monospacedDigit()
                         .padding(.horizontal, 6).padding(.vertical, 4)
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .foregroundStyle(selected ? PulsePlayerStyle.mediaBackdrop : PulsePlayerStyle.onDark)
-                        .background(selected ? PulsePlayerStyle.mediaAccent : PulsePlayerStyle.onDark.opacity(0.08), in: Capsule())
+                        .foregroundStyle(selected ? PulsePlayerStyle.mediaAccent : PulsePlayerStyle.onDark)
+                        .pulsePlayerGlass(in: Capsule(), tint: PulsePlayerStyle.mediaBackdrop.opacity(0.7),
+                                          fallback: PulsePlayerStyle.mediaSurface, onDark: true)
+                        .overlay {
+                            if selected {
+                                Capsule().strokeBorder(PulsePlayerStyle.mediaAccent, lineWidth: 1.5).allowsHitTesting(false)
+                            }
+                        }
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(PressStyle())
@@ -1734,42 +1734,63 @@ private struct ClipPage: View {
         }
     }
 
+    private var toolsPreview: some View {
+        HStack(spacing: 14) {
+            Group {
+                if clip.playbackURL.isFileURL {
+                    VideoFileThumbnail(url: clip.playbackURL, maximumSize: 200, fallbackCover: clip.coverURL)
+                } else {
+                    MediaCover(url: clip.coverURL, onMedia: true)
+                }
+            }
+            .frame(width: 58, height: 70)
+            .clipShape(.rect(cornerRadius: 10))
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: clip.title).font(.capture(.headline, weight: .semibold))
+                    .lineLimit(3)
+                if playback.timeline.duration > 0 {
+                    Text(verbatim: durationLabel(playback.timeline.duration))
+                        .font(.capture(.footnote)).monospacedDigit().foregroundStyle(PulsePlayerStyle.mediaSecondary)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .pulsePlayerKeepControlsTogether()
+    }
+
     @ViewBuilder private func moreOptions(isLocal: Bool) -> some View {
         let saved = clip.localMovieID.map { library.isLocalSaved($0) } ?? library.isSaved(clip)
         let movable = isLocal && localMovie?.isExport == false ? localMovie : nil
-        VStack(alignment: .leading, spacing: 2) {
-            Text(verbatim: clip.title).font(.capture(.headline, weight: .semibold))
-                .fixedSize(horizontal: false, vertical: true)
-            playbackSourceLink
-        }
-
-        Button(action: save) {
-            HStack(spacing: 10) {
-                TintedArtwork(name: saved ? "PlayerFavorited" : "PlayerFavorite", tint: PulsePlayerStyle.mediaAccent)
-                    .frame(width: 18, height: 18)
-                LocalizedText(saved ? "Remove from favorites" : "Save to favorites")
-                    .fixedSize(horizontal: false, vertical: true)
+        let columns = [GridItem(.adaptive(minimum: typeSize.isAccessibilitySize ? 184 : 126), spacing: 8)]
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+            PlaybackToolButton(saved ? "Remove from favorites" : "Save to favorites", symbol: .bookmark, selected: saved, action: save)
+            PlaybackToolButton(clip.localMovieID == nil ? "Edit a local video" : "Edit video", symbol: .edit) {
+                editorAfterOptions = true
+                options = nil
+            }
+            if movable != nil {
+                PlaybackToolButton("Move to folder", symbol: .folder, selected: showsFolderOptions) { showsFolderOptions.toggle() }
+            }
+            if clip.localMovieID != nil {
+                VideoExportEntry(clip: clip) { openExport in
+                    PlaybackToolButton("Export video", symbol: .download, action: openExport)
+                }
             }
         }
-        .buttonStyle(PlaybackUtilityStyle())
+        .pulsePlayerKeepControlsTogether()
         if let favoriteError { ErrorNote(message: favoriteError, onMedia: true) }
+        if let movable, showsFolderOptions { folderOptions(for: movable) }
 
-        optionButton(clip.localMovieID == nil ? "Edit a local video" : "Edit video", symbol: .edit) {
-            editorAfterOptions = true
-            options = nil
+        Toggle(isOn: $fillsScreen) {
+            LocalizedText("Fill screen").font(.capture(.subheadline, weight: .semibold))
         }
-        if let movable {
-            optionButton("Move to folder", symbol: .folder) { showsFolderOptions.toggle() }
-                .accessibilityAddTraits(showsFolderOptions ? .isSelected : [])
-            if showsFolderOptions { folderOptions(for: movable) }
-        }
-        if clip.localMovieID == nil {
-            OfflineDownloadButton(clip: foldSource)
-        } else {
-            VideoExportEntry(clip: clip) { openExport in
-                optionButton("Export video", symbol: .download, action: openExport)
-            }
-        }
+        .padding(.horizontal, 4).frame(minHeight: 48)
+        .tint(PulsePlayerStyle.mediaAccent)
+        .accessibilityIdentifier("player.fillScreen")
+
+        playbackSourceLink
+        if clip.localMovieID == nil { OfflineDownloadButton(clip: foldSource) }
         if isLocal && localPlaylist.count > 1 { playlistOptions }
     }
 
@@ -1825,7 +1846,7 @@ private struct ClipPage: View {
         return VStack(alignment: .leading, spacing: 8) {
             SectionLabel(title: "Folders").accessibilityAddTraits(.isHeader)
             if library.folders.isEmpty {
-                LocalizedText("No folders yet").font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.mediaSecondary)
+                EmptyStateScene(appearance: .inline(.folder), title: "No folders yet", onMedia: true)
             }
             LazyVStack(spacing: 0) {
                 if movie.folderID != nil {
@@ -2027,8 +2048,8 @@ private struct PlayerHeader: View {
             if let exit {
                 if overMedia {
                     PlayerExitButton(overMedia: true, action: exit)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.trailing, PlayerTopControls.edgeInset)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, PlayerTopControls.edgeInset)
                 } else {
                     PlayerExitButton(overMedia: false, action: exit)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2047,7 +2068,7 @@ private struct PlayerExitButton: View {
         let foreground = overMedia ? PulsePlayerStyle.onDark : PulsePlayerStyle.paper
         Button(action: action) {
             HStack(spacing: 6) {
-                Glyph(symbol: .close, size: overMedia ? 16 : 12, tint: foreground)
+                Glyph(symbol: overMedia ? .back : .close, size: overMedia ? 16 : 12, tint: foreground)
                 if !overMedia {
                     LocalizedText("Exit").font(.capture(.footnote, weight: .semibold))
                         .foregroundStyle(foreground).fixedSize(horizontal: false, vertical: true)
@@ -2063,6 +2084,38 @@ private struct PlayerExitButton: View {
     }
 }
 
+struct PlaybackToolButton: View {
+    let title: String
+    let symbol: PulsePlayerGlyph
+    let selected: Bool
+    let action: () -> Void
+
+    init(_ title: String, symbol: PulsePlayerGlyph, selected: Bool = false, action: @escaping () -> Void) {
+        self.title = title
+        self.symbol = symbol
+        self.selected = selected
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 10) {
+                Glyph(symbol: symbol, size: 20, tint: PulsePlayerStyle.mediaAccent)
+                LocalizedText(title).font(.capture(.subheadline, weight: .semibold))
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+            .pulsePlayerGlass(in: .rect(cornerRadius: 16), tint: selected ? PulsePlayerStyle.mediaAccent.opacity(0.18) : nil,
+                              fallback: PulsePlayerStyle.mediaSurface, onDark: true)
+            .contentShape(.rect(cornerRadius: 16))
+        }
+        .buttonStyle(PressStyle())
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
 struct PlayerMenuRow<Label: View>: View {
     @Environment(\.isEnabled) private var isEnabled
     let symbol: PulsePlayerGlyph
@@ -2071,7 +2124,7 @@ struct PlayerMenuRow<Label: View>: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Glyph(symbol: symbol, size: 16, tint: PulsePlayerStyle.mediaAccent).frame(width: 22)
+            MenuGlyph(symbol: symbol, tint: PulsePlayerStyle.mediaAccent)
             label()
                 .font(.capture(.subheadline, weight: .medium))
                 .foregroundStyle(PulsePlayerStyle.onDark)
@@ -2165,13 +2218,14 @@ struct PlayerProgressControl: View {
 
 private struct PlayerPoster: View {
     let url: URL?
+    @AppStorage(PlayerDisplayPreference.fillKey) private var fillsScreen = true
     var body: some View {
         PulsePlayerStyle.mediaBackdrop.overlay {
             GeometryReader { geometry in
                 if let url {
                     AsyncImage(url: url) { phase in
                         if let image = phase.image {
-                            image.resizable().scaledToFill()
+                            image.resizable().aspectRatio(contentMode: fillsScreen ? .fill : .fit)
                                 .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                         }
                     }
@@ -2291,32 +2345,31 @@ private struct PlaybackFoldNavigation: View {
             if let entry = practice.entry(for: identity),
                let index = entry.steps.firstIndex(where: { $0.id == entry.selectedID }) {
                 let current = entry.steps[index]
-                Text(verbatim: videoTitle).font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.mediaSecondary)
-                    .lineLimit(typeSize.isAccessibilitySize ? nil : 2)
-                    .fixedSize(horizontal: false, vertical: true)
                 let number = (index + 1).formatted(.number.locale(locale))
                 let total = entry.steps.count.formatted(.number.locale(locale))
                 let stepNumber = L10n.format("Fold %@ of %@", [number, total], language: language)
-                if let name = current.displayName(language: language) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(verbatim: stepNumber).font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.mediaAccent)
-                        Text(verbatim: name).font(.capture(.headline, weight: .semibold))
+                let layout = typeSize.isAccessibilitySize
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
+                    : AnyLayout(HStackLayout(alignment: .center, spacing: 6))
+                layout {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: current.displayName(language: language) ?? videoTitle)
+                            .font(.capture(.subheadline, weight: .semibold))
+                            .lineLimit(typeSize.isAccessibilitySize ? nil : 2)
                             .fixedSize(horizontal: false, vertical: true)
-                    }.accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
-                } else {
-                    Text(verbatim: stepNumber).font(.capture(.headline, weight: .semibold))
-                        .accessibilityAddTraits(.isHeader)
-                }
-                if entry.steps.count > 1 {
-                    let links = Group {
-                        if index > 0 { stepLink(entry.steps[index - 1], in: entry.id, next: false) }
-                        if index + 1 < entry.steps.count { stepLink(entry.steps[index + 1], in: entry.id, next: true) }
+                        Text(verbatim: stepNumber)
+                            .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.mediaAccent)
                     }
-                    ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .top, spacing: 10) { links }.fixedSize(horizontal: true, vertical: false)
-                        VStack(alignment: .leading, spacing: 0) { links }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isHeader)
+                    if entry.steps.count > 1 {
+                        HStack(spacing: 2) {
+                            if index > 0 { stepLink(entry.steps[index - 1], in: entry.id, next: false) }
+                            if index + 1 < entry.steps.count { stepLink(entry.steps[index + 1], in: entry.id, next: true) }
+                        }
+                        .disabled(!enabled)
                     }
-                    .disabled(!enabled)
                 }
             } else {
                 Text(verbatim: videoTitle).font(.capture(.subheadline, weight: .semibold))
@@ -2334,31 +2387,21 @@ private struct PlaybackFoldNavigation: View {
     }
 
     private func stepLink(_ step: FoldPracticeStep, in id: FoldPracticeID, next: Bool) -> some View {
-        let name = step.displayName(language: language)
+        let time = durationLabel(step.start)
         return Button {
             do {
                 try jump(id, step.id)
                 error = nil
             } catch { self.error = error.localizedDescription }
         } label: {
-            HStack(spacing: 6) {
-                if !next { Glyph(symbol: .back, size: 10, tint: PulsePlayerStyle.mediaAccent) }
-                VStack(alignment: .leading, spacing: 1) {
-                    LocalizedText(next ? "Next fold" : "Previous fold")
-                        .font(.capture(.footnote, weight: .semibold))
-                        .foregroundStyle(PulsePlayerStyle.mediaAccent)
-                    if next, let name {
-                        Text(verbatim: name).font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.onDark)
-                    }
-                }.fixedSize(horizontal: false, vertical: true)
-                if next { Glyph(symbol: .back, size: 10, tint: PulsePlayerStyle.mediaAccent).rotationEffect(.degrees(180)) }
-            }
-            .padding(.horizontal, 8).padding(.vertical, 3).frame(minHeight: 44)
-            .background(PulsePlayerStyle.onDark.opacity(0.08), in: .rect(cornerRadius: 9))
-            .contentShape(Rectangle())
+            Glyph(symbol: .back, size: 15, tint: PulsePlayerStyle.mediaAccent)
+                .rotationEffect(.degrees(next ? 180 : 0))
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
         }
-        .buttonStyle(PressStyle()).multilineTextAlignment(.leading)
-        .accessibilityValue(Text(verbatim: durationLabel(step.start)))
+        .buttonStyle(PressStyle())
+        .accessibilityLabel(LocalizedStringKey(next ? "Next fold" : "Previous fold"))
+        .accessibilityValue(Text(verbatim: step.displayName(language: language).map { "\($0), \(time)" } ?? time))
         .accessibilityIdentifier(next ? "player.nextMarkedFold" : "player.previousMarkedFold")
     }
 }

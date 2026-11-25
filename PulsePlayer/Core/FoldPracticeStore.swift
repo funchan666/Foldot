@@ -6,7 +6,7 @@ enum FoldPracticeID: Codable, Hashable {
     case lesson(environment: String, owner: String, clipID: String)
 }
 
-struct FoldPracticeStep: Codable, Identifiable {
+struct FoldPracticeStep: Codable, Identifiable, Hashable {
     let id: UUID
     let start: Double
     let addedAt: Date
@@ -19,32 +19,7 @@ struct FoldPracticeStep: Codable, Identifiable {
     }
 }
 
-/// Chapter starts in the bundled 335-second cut of Tavin's crane demonstration.
-struct CraneChapter: Identifiable {
-    let start: Double
-    let title: String
-    var id: Double { start }
-
-    static let filmDuration: Double = 335
-    static func filmCredit(for source: URL) -> String? {
-        guard let film = Bundle.main.url(forResource: "PaperCrane", withExtension: "mp4"),
-              source.standardizedFileURL == film.standardizedFileURL else { return nil }
-        return "Adapted from OrigamiCrane by Tavin (2010). https://commons.wikimedia.org/wiki/File:OrigamiCrane.ogv • CC BY 3.0 https://creativecommons.org/licenses/by/3.0/"
-    }
-    static let guide = [
-        Self(start: 0, title: "Fold the square in half both ways"),
-        Self(start: 33, title: "Crease both diagonals"),
-        Self(start: 61, title: "Collapse the square base"),
-        Self(start: 78, title: "Bring the edges to the center"),
-        Self(start: 120, title: "Lift the first petal fold"),
-        Self(start: 150, title: "Repeat the petal fold on the back"),
-        Self(start: 196, title: "Narrow the two lower points"),
-        Self(start: 246, title: "Raise the neck and tail"),
-        Self(start: 301, title: "Shape the wings and beak")
-    ]
-}
-
-struct FoldPracticeEntry: Codable, Identifiable {
+struct FoldPracticeEntry: Codable, Identifiable, Hashable {
     let id: FoldPracticeID
     var clip: LessonClip
     var steps: [FoldPracticeStep]
@@ -52,7 +27,7 @@ struct FoldPracticeEntry: Codable, Identifiable {
     var updatedAt: Date
     var finishedAt: Date?
     var duration: Double?
-    var craneGuideRevision: Int?
+    var removedFromContinueWatching: Bool?
 
     var currentStepNumber: Int { (steps.firstIndex(where: { $0.id == selectedID }) ?? 0) + 1 }
     var currentStep: FoldPracticeStep? { steps.first { $0.id == selectedID } }
@@ -145,6 +120,7 @@ final class FoldPracticeStore: ObservableObject {
         entry.steps.append(step)
         entry.steps.sort { $0.start < $1.start }
         entry.selectedID = step.id
+        entry.removedFromContinueWatching = nil
         entry.finishedAt = nil
         try commit(entry)
     }
@@ -192,8 +168,15 @@ final class FoldPracticeStore: ObservableObject {
         try commit(entry)
     }
 
+    func removeFromContinueWatching(_ id: FoldPracticeID) throws {
+        guard var entry = records[id] else { return }
+        entry.removedFromContinueWatching = true
+        try commit(entry, updateTimestamp: false)
+    }
+
     func markOpened(_ id: FoldPracticeID) {
-        guard let entry = records[id], entry.finishedAt == nil else { return }
+        guard var entry = records[id], entry.finishedAt == nil || entry.removedFromContinueWatching == true else { return }
+        entry.removedFromContinueWatching = nil
         do { try commit(entry) } catch { self.error = error.localizedDescription }
     }
 
@@ -224,7 +207,11 @@ final class FoldPracticeStore: ObservableObject {
     private func read() throws {
         do {
             let data = try Data(contentsOf: file)
-            records = try JSONDecoder().decode([FoldPracticeID: FoldPracticeEntry].self, from: data)
+            var saved = try JSONDecoder().decode([FoldPracticeID: FoldPracticeEntry].self, from: data)
+            if saved.removeValue(forKey: .movie(LibraryStore.retiredSampleID)) != nil {
+                try JSONEncoder().encode(saved).write(to: file, options: .atomic)
+            }
+            records = saved
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             records = [:]
         }
@@ -232,42 +219,10 @@ final class FoldPracticeStore: ObservableObject {
         error = nil
     }
 
-    func openCraneGuide(for clip: LessonClip, chapter: CraneChapter?) throws {
-        try ensureReadable()
-        guard let movieID = clip.localMovieID else { throw PulsePlayerError.unsupportedMedia }
-        let id = FoldPracticeID.movie(movieID)
-        let original = records[id]
-        var entry = original ?? FoldPracticeEntry(id: id, clip: clip, steps: [], selectedID: UUID(), updatedAt: .now)
-        let needsGuide = entry.craneGuideRevision == nil
-        guard needsGuide || chapter != nil else { return }
-
-        // Install the map once. Opening one deleted chapter later restores just that chapter.
-        let chapters = needsGuide ? CraneChapter.guide : [chapter].compactMap { $0 }
-        let oldestMark = entry.steps.map(\.addedAt).min() ?? Date()
-        for (index, item) in chapters.enumerated() {
-            if let match = entry.steps.firstIndex(where: { abs($0.start - item.start) < Self.minimumSpan }) {
-                entry.steps[match].lessonTitleKey = item.title
-            } else {
-                let timestamp = oldestMark.addingTimeInterval(Double(index - chapters.count) / 1_000)
-                entry.steps.append(FoldPracticeStep(id: UUID(), start: item.start, addedAt: timestamp, lessonTitleKey: item.title))
-            }
-        }
-        entry.steps.sort { $0.start < $1.start }
-        entry.duration = CraneChapter.filmDuration
-        entry.craneGuideRevision = 1
-        if let chapter, let selected = entry.steps.first(where: { abs($0.start - chapter.start) < Self.minimumSpan }) {
-            entry.selectedID = selected.id
-            entry.finishedAt = nil
-        } else if original == nil, let first = entry.steps.first {
-            entry.selectedID = first.id
-        }
-        try commit(entry)
-    }
-
-    private func commit(_ record: FoldPracticeEntry) throws {
+    private func commit(_ record: FoldPracticeEntry, updateTimestamp: Bool = true) throws {
         try ensureReadable()
         var updated = record
-        updated.updatedAt = .now
+        if updateTimestamp { updated.updatedAt = .now }
         var next = records
         next[record.id] = updated.steps.isEmpty ? nil : updated
         do {

@@ -21,7 +21,6 @@
 		50ADE255338BE02989CA8513 /* GoogleUserMessagingPlatform in Frameworks */ = {isa = PBXBuildFile; productRef = 0329FE2EF997A30C91906438 /* GoogleUserMessagingPlatform */; };
 		6AF10A27CB2DD141266F1710 /* PulsePlayer/Core/QuotaStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E822DCE2A437F4FCB346A9 /* PulsePlayer/Core/QuotaStore.swift */; };
 		78575180CDAA51B15A1E7799 /* PulsePlayer/Features/FoldPracticeControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF66AA80124DBF96C75B9640 /* PulsePlayer/Features/FoldPracticeControls.swift */; };
-		79451E984E8C9EA47E0371D0 /* PulsePlayer/Resources/PaperCranePreview.jpg in Resources */ = {isa = PBXBuildFile; fileRef = BE3D158DAE1673B79DF0AB38 /* PulsePlayer/Resources/PaperCranePreview.jpg */; };
 		79CDD73938BF2D09D9492954 /* PulsePlayer/Core/APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3B808EADBFC1086054EA47A /* PulsePlayer/Core/APIClient.swift */; };
 		7B09C0AD27B85A0F2B696B81 /* PulsePlayer/Features/FoldNotebookView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04363358651739130F75FE25 /* PulsePlayer/Features/FoldNotebookView.swift */; };
 		7B7855892215464D7C4CB60A /* PulsePlayer/Core/RewardedAds.swift in Sources */ = {isa = PBXBuildFile; fileRef = 675FC4243CA06F6ED86F21AC /* PulsePlayer/Core/RewardedAds.swift */; };
@@ -39,7 +38,6 @@
 		D0DFDA960A87B68556723DA1 /* PulsePlayer/Features/DiscoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62B7ED2C47711EEDC253A7BD /* PulsePlayer/Features/DiscoverView.swift */; };
 		E8A0A1000000000000000001 /* PulsePlayer/Core/LessonStreamExport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8A0A1000000000000000002 /* PulsePlayer/Core/LessonStreamExport.swift */; };
 		FDC33C2406605B5455C36984 /* PulsePlayer/Features/LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7641F37159249EE8BA2436D1 /* PulsePlayer/Features/LibraryView.swift */; };
-		FFA328D9E0251442DAB34F2E /* PulsePlayer/Resources/PaperCrane.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = BE69894CD6810E1725B5805E /* PulsePlayer/Resources/PaperCrane.mp4 */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -80,8 +78,6 @@
 		AF66AA80124DBF96C75B9640 /* PulsePlayer/Features/FoldPracticeControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulsePlayer/Features/FoldPracticeControls.swift; sourceTree = SOURCE_ROOT; };
 		B01A9BEACE5275588553E5AD /* PulsePlayer/Resources/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PulsePlayer/Resources/PrivacyInfo.xcprivacy; sourceTree = SOURCE_ROOT; };
 		B2E822DCE2A437F4FCB346A9 /* PulsePlayer/Core/QuotaStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulsePlayer/Core/QuotaStore.swift; sourceTree = SOURCE_ROOT; };
-		BE3D158DAE1673B79DF0AB38 /* PulsePlayer/Resources/PaperCranePreview.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = PulsePlayer/Resources/PaperCranePreview.jpg; sourceTree = SOURCE_ROOT; };
-		BE69894CD6810E1725B5805E /* PulsePlayer/Resources/PaperCrane.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = PulsePlayer/Resources/PaperCrane.mp4; sourceTree = SOURCE_ROOT; };
 		C71000000000000000000002 /* PulsePlayer/App/CaptureTypography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulsePlayer/App/CaptureTypography.swift; sourceTree = SOURCE_ROOT; };
 		E3B808EADBFC1086054EA47A /* PulsePlayer/Core/APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulsePlayer/Core/APIClient.swift; sourceTree = SOURCE_ROOT; };
 		E4BD89A549F49134CAB0C817 /* PulsePlayer/App/DesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulsePlayer/App/DesignSystem.swift; sourceTree = SOURCE_ROOT; };
@@ -119,8 +115,6 @@
 				118C632D8D0781A3713E44FE /* PulsePlayer/Core/FoldPracticeStore.swift */,
 				AF66AA80124DBF96C75B9640 /* PulsePlayer/Features/FoldPracticeControls.swift */,
 				04363358651739130F75FE25 /* PulsePlayer/Features/FoldNotebookView.swift */,
-				BE69894CD6810E1725B5805E /* PulsePlayer/Resources/PaperCrane.mp4 */,
-				BE3D158DAE1673B79DF0AB38 /* PulsePlayer/Resources/PaperCranePreview.jpg */,
 				1AC010000000000000000001 /* PulsePlayer/App/AppLanguage.swift */,
 				1AC0100000000000000000C8 /* InfoPlist.strings */,
 				1AC010000000000000000064 /* Localizable.strings */,
@@ -223,8 +217,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FFA328D9E0251442DAB34F2E /* PulsePlayer/Resources/PaperCrane.mp4 in Resources */,
-				79451E984E8C9EA47E0371D0 /* PulsePlayer/Resources/PaperCranePreview.jpg in Resources */,
 				1AC0100000000000000000C9 /* InfoPlist.strings in Resources */,
 				1AC010000000000000000065 /* Localizable.strings in Resources */,
 				0A80A0B8549C3D5AB3BBC1FC /* PulsePlayer/Resources/Assets.xcassets in Resources */,

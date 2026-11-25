@@ -193,7 +193,6 @@ final class VideoEditor: ObservableObject {
             }
             guard let session = AVAssetExportSession(asset: composition, presetName: audioOnly ? AVAssetExportPresetAppleM4A : AVAssetExportPresetHighestQuality) else { throw PulsePlayerError.unsupportedMedia }
             exporter = session
-            Self.creditLesson(in: session, source: sourceURL)
             if !audioOnly { session.videoComposition = video }
             session.shouldOptimizeForNetworkUse = true
             progressTask = Task { [weak self] in
@@ -229,16 +228,7 @@ final class VideoEditor: ObservableObject {
         }
         session.timeRange = CMTimeRange(start: CMTime(seconds: range.lowerBound, preferredTimescale: 600),
                                        end: CMTime(seconds: range.upperBound, preferredTimescale: 600))
-        creditLesson(in: session, source: source)
         try await write(session, to: destination, as: .mp4)
-    }
-
-    private static func creditLesson(in session: AVAssetExportSession, source: URL) {
-        guard let text = CraneChapter.filmCredit(for: source) else { return }
-        let credit = AVMutableMetadataItem()
-        credit.identifier = .commonIdentifierDescription
-        credit.value = text as NSString
-        session.metadata = [credit]
     }
 
     static func write(_ session: AVAssetExportSession, to destination: URL, as type: AVFileType,

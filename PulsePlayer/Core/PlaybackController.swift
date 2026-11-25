@@ -42,6 +42,10 @@ final class LocalPlaybackResume: ObservableObject {
     private init() {
         positions = UserDefaults.standard.data(forKey: Self.positionsKey)
             .flatMap { try? JSONDecoder().decode([LocalPlaybackIdentity: LocalPlaybackPosition].self, from: $0) } ?? [:]
+        if positions.removeValue(forKey: .movie(LibraryStore.retiredSampleID)) != nil,
+           let data = try? JSONEncoder().encode(positions) {
+            UserDefaults.standard.set(data, forKey: Self.positionsKey)
+        }
     }
 
     func position(for movie: PracticeRecording) -> LocalPlaybackPosition? { positions[.movie(movie.id)] }

@@ -143,6 +143,10 @@ final class OfflineStore: NSObject, ObservableObject {
     func cached(_ id: String) -> OfflineVideo? {
         videos.first { $0.id == id && $0.owner == api.offlineOwnerID && $0.hasLocalFile }
     }
+    func cachedEditableFile(for id: String) -> URL? {
+        guard let copy = cached(id), !copy.isHLS else { return nil }
+        return copy.url
+    }
     func markOpened(_ id: String) {
         guard let video = cached(id),
               let position = index.videos.firstIndex(where: { $0.id == id && $0.owner == video.owner }) else { return }
@@ -183,36 +187,57 @@ final class OfflineStore: NSObject, ObservableObject {
             matching.forEach { observeProgress(of: $0, transferID: transfer.id); $0.resume() }
         }
     }
-    /// Player and notebook exports need an editable file, including when a playable HLS package is cached.
-    func editableSource(for clip: LessonClip, authorization: MediaExportAuthorization) async throws -> URL {
-        try commerce.requireMediaExport(authorization)
+    struct EditableSource {
+        let url: URL
+        let checkOwner: (@MainActor () throws -> Void)?
+    }
+
+    /// Imports belong to the device. An offline lesson stays scoped to the account that downloaded it.
+    func editableSource(for clip: LessonClip, expectedOwner: String? = nil) async throws -> EditableSource {
+        try Task.checkCancellation()
         if clip.localMovieID != nil {
+            guard expectedOwner == nil else { throw PulsePlayerError.unauthorized }
             guard clip.playbackURL.isFileURL, FileManager.default.isReadableFile(atPath: clip.playbackURL.path) else {
                 throw PulsePlayerError.service("This video is no longer in the library.")
             }
-            return clip.playbackURL
+            return EditableSource(url: clip.playbackURL, checkOwner: nil)
+        }
+        guard let owner = api.offlineOwnerID else {
+            throw PulsePlayerError.service("Connect to your account before downloading.")
+        }
+        guard expectedOwner == nil || expectedOwner == owner else { throw PulsePlayerError.unauthorized }
+        let checkOwner: @MainActor () throws -> Void = { [api] in
+            guard owner == api.offlineOwnerID else { throw PulsePlayerError.unauthorized }
+        }
+        if let file = cachedEditableFile(for: clip.id) {
+            return EditableSource(url: file, checkOwner: checkOwner)
+        }
+        // Acquiring the editable original uses the regular authenticated download allowance.
+        guard api.session?.userId.value == owner else {
+            throw PulsePlayerError.service("Connect to your account before downloading.")
         }
         let requestID = UUID()
         do {
             await resumePending()
             try Task.checkCancellation()
-            try commerce.requireMediaExport(authorization)
-            if let copy = cached(clip.id), !copy.isHLS { return copy.url }
+            try checkOwner()
             if downloadingID == clip.id || preparingID == clip.id {
-                try await waitForSource(of: clip.id, owner: authorization.owner)
-                try commerce.requireMediaExport(authorization)
-                if let copy = cached(clip.id), !copy.isHLS { return copy.url }
+                if index.transfer?.completed == true, error != nil { await retryCompletion() }
+                try await waitForSource(of: clip.id, owner: owner)
+                try checkOwner()
             }
-            guard !busy else { throw PulsePlayerError.service("Another download is in progress.") }
-            await download(clip, authorization: authorization, requestID: requestID)
-            try await waitForSource(of: clip.id, owner: authorization.owner)
-            try commerce.requireMediaExport(authorization)
-            guard let copy = cached(clip.id), !copy.isHLS else {
+            if cachedEditableFile(for: clip.id) == nil {
+                guard !busy else { throw PulsePlayerError.service("Another download is in progress.") }
+                await download(clip, editableFor: owner, requestID: requestID)
+                try await waitForSource(of: clip.id, owner: owner)
+                try checkOwner()
+            }
+            guard let file = cachedEditableFile(for: clip.id) else {
                 throw PulsePlayerError.service(error ?? Self.missingExportSource)
             }
-            return copy.url
+            return EditableSource(url: file, checkOwner: checkOwner)
         } catch {
-            if index.transfer?.id == requestID, Task.isCancelled || authorization.owner != api.session?.userId.value {
+            if index.transfer?.id == requestID, Task.isCancelled || owner != api.session?.userId.value {
                 await cancel()
             }
             throw error
@@ -231,12 +256,8 @@ final class OfflineStore: NSObject, ObservableObject {
         throw CancellationError()
     }
 
-    func download(_ clip: LessonClip, authorization: MediaExportAuthorization? = nil, requestID: UUID = UUID()) async {
-        let forExport = authorization != nil
-        if let authorization {
-            do { try commerce.requireMediaExport(authorization) }
-            catch { self.error = error.localizedDescription; return }
-        }
+    func download(_ clip: LessonClip, editableFor editingOwner: String? = nil, requestID: UUID = UUID()) async {
+        let forExport = editingOwner != nil
         guard preparingID == nil else { error = "Another download is being prepared."; return }
         preparingID = clip.id
         defer { preparingID = nil }
@@ -246,6 +267,7 @@ final class OfflineStore: NSObject, ObservableObject {
         guard !restoring, downloadingID == nil else { error = "Another download is in progress."; return }
         if let existing = cached(clip.id), !forExport || !existing.isHLS { return }
         guard let owner = api.session?.userId.value else { error = "Connect to your account before downloading."; return }
+        guard editingOwner == nil || editingOwner == owner else { error = PulsePlayerError.unauthorized.localizedDescription; return }
         guard forExport || !clip.playbackURL.isFileURL else { error = "This video is already stored on this device."; return }
         guard quota.mayDownload(clip.id, premium: commerce.premium) else {
             error = quota.error ?? (commerce.premium ? "Connect to refresh your allowance." : "Your download allowance is used up.")
@@ -265,10 +287,6 @@ final class OfflineStore: NSObject, ObservableObject {
         guard quota.mayDownload(clip.id, premium: commerce.premium) else {
             error = quota.error ?? (commerce.premium ? "Connect to refresh your allowance." : "Your download allowance is used up.")
             return
-        }
-        if let authorization {
-            do { try commerce.requireMediaExport(authorization) }
-            catch { self.error = error.localizedDescription; return }
         }
         // A player may hand us its local playback copy. Keep the remote identity
         // in the index so a removed cache can still be downloaded/exported again.

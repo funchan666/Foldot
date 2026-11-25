@@ -31,8 +31,10 @@ struct ToolsView: View {
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
+    @Environment(\.dynamicTypeSize) private var typeSize
     @ObservedObject private var notebook = FoldPracticeStore.shared
     let openPlus: () -> Void
+    let edit: (PracticeRecording, VideoTool) -> Void
     @State private var chosenID: UUID?
     @State private var measuredDuration: (movieID: UUID, seconds: Double)?
     @State private var sheet: ToolSheet?
@@ -41,13 +43,11 @@ struct ToolsView: View {
 
     private enum ToolSheet: Identifiable {
         case sources
-        case editor(VideoTool, PracticeRecording?)
         case frames(RangeFrameRequest)
 
         var id: String {
             switch self {
             case .sources: return "sources"
-            case .editor(let tool, let movie): return tool.id + (movie?.id.uuidString ?? "")
             case .frames(let request): return request.id.uuidString
             }
         }
@@ -60,57 +60,20 @@ struct ToolsView: View {
     var body: some View {
         let movie = videos.first { $0.id == chosenID }
             ?? videos.first { notebook.entry(for: .movie($0.id)) != nil } ?? videos.first
-        ScenePage { _ in
-            VStack(alignment: .leading, spacing: 20) {
-                HStack {
+        ScenePage { container in
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 8) {
                     IconButton(symbol: .back, label: "Back", glass: true) { dismiss() }
-                    Spacer()
+                        .accessibilityValue(Text("Fold workbench"))
+                    Spacer(minLength: 8)
                     PlusEntryButton(action: openPlus)
                 }
-                SceneTitle("Fold workbench", size: 32)
                 if let movie {
-                    Text(verbatim: movie.displayFilename).font(.headline).accessibilityAddTraits(.isHeader)
-                    ActionButton(title: "Change video", primary: false) { sheet = .sources }
-                    if let entry = notebook.entry(for: .movie(movie.id)),
-                       let duration = entry.duration ?? entry.clip.duration ?? (measuredDuration?.movieID == movie.id ? measuredDuration?.seconds : nil) {
-                        LocalizedText("Compare the paper before and after a fold.")
-                            .foregroundStyle(PulsePlayerStyle.secondary)
-                        ForEach(Array(entry.steps.enumerated()), id: \.element.id) { index, step in
-                            if let range = entry.loopRange(for: step, duration: duration) {
-                                let name = step.displayName(language: .from(locale))
-                                    ?? L10n.format("Fold %@", [String(index + 1)], language: .from(locale))
-                                Button {
-                                    let mark = VideoRangeMark(id: step.id, name: name, start: range.lowerBound, end: range.upperBound)
-                                    sheet = .frames(RangeFrameRequest(source: library.url(for: movie), mark: mark))
-                                } label: {
-                                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                        Text(verbatim: durationLabel(step.start)).monospacedDigit()
-                                            .foregroundStyle(PulsePlayerStyle.secondary)
-                                            .environment(\.layoutDirection, .leftToRight)
-                                        Text(verbatim: name).multilineTextAlignment(.leading)
-                                    }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                        .contentShape(Rectangle())
-                                }.buttonStyle(PressStyle())
-                                Divider()
-                            }
-                        }
-                    } else {
-                        if notebook.entry(for: .movie(movie.id)) == nil {
-                            LocalizedText("Mark a fold in the player to compare its frames here.")
-                        }
-                        ActionButton(title: "Open in player") {
-                            if let route = PlayerRoute.localMovies([movie], selected: movie, library: library) {
-                                playback = route
-                            } else { library.error = "This video file is no longer available." }
-                        }
-                    }
-                    SectionLabel(title: "Edit video")
-                    ForEach([VideoTool.studio, .ranges, .speed, .frame, .audio]) { tool in
-                        EditorCommand(title: tool.title, symbol: tool.glyph, expanded: true) {
-                            sheet = .editor(tool, movie)
-                        }
-                    }
+                    sourceRow(movie)
+                    editingTools(for: movie, in: container)
+                    comparisons(for: movie)
                 } else {
+                    EmptyStateScene(appearance: .screening(.edit), message: "Choose a video from Photos or Files to start editing.")
                     ActionButton(title: "Choose a video") { sheet = .sources }
                 }
             }
@@ -128,19 +91,98 @@ struct ToolsView: View {
         .sheet(item: $sheet) { route in
             switch route {
             case .frames(let request): RangeFrameComparison(request: request)
-            case .editor(let tool, let movie): EditorSheet(initialMovie: movie, initialTool: tool)
             case .sources: sources
+            }
+        }
+    }
+
+    private func sourceRow(_ movie: PracticeRecording) -> some View {
+        HStack(spacing: 8) {
+            Button { sheet = .sources } label: {
+                HStack(spacing: 10) {
+                    VideoFileThumbnail(url: library.url(for: movie))
+                        .frame(width: 56, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    Text(verbatim: movie.displayFilename)
+                        .font(.capture(.subheadline, weight: .semibold))
+                        .lineLimit(typeSize.isAccessibilitySize ? nil : 2)
+                        .multilineTextAlignment(.leading)
+                    Glyph(symbol: .back, size: 11, tint: PulsePlayerStyle.secondary)
+                        .environment(\.layoutDirection, .leftToRight)
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PressStyle())
+            .accessibilityLabel(LocalizedStringKey("Change video"))
+            .accessibilityValue(Text(verbatim: movie.displayFilename))
+            IconButton(symbol: .play, label: "Open in player", glass: true) {
+                if let route = PlayerRoute.localMovies([movie], selected: movie, library: library) {
+                    playback = route
+                } else { library.error = "This video file is no longer available." }
+            }
+        }
+    }
+
+    private func editingTools(for movie: PracticeRecording, in container: GeometryProxy) -> some View {
+        let width = PulsePlayerStyle.pageContentWidth(in: container)
+        let divided = PulsePlayerStyle.intersectsReservedRegion(CGRect(origin: .zero, size: container.size), in: container)
+        let count = typeSize.isAccessibilitySize || width < 320 || divided ? 1 : 2
+        return VStack(alignment: .leading, spacing: 8) {
+            EditorCommand(title: VideoTool.studio.title, symbol: VideoTool.studio.glyph, emphasized: true, expanded: true) {
+                edit(movie, .studio)
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: count), spacing: 8) {
+                ForEach([VideoTool.ranges, .speed, .frame, .audio]) { tool in
+                    EditorCommand(title: tool.title, symbol: tool.glyph, expanded: true) { edit(movie, tool) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func comparisons(for movie: PracticeRecording) -> some View {
+        if let entry = notebook.entry(for: .movie(movie.id)),
+           let duration = entry.duration ?? entry.clip.duration ?? (measuredDuration?.movieID == movie.id ? measuredDuration?.seconds : nil) {
+            let marks: [VideoRangeMark] = entry.steps.enumerated().compactMap { index, step in
+                guard let range = entry.loopRange(for: step, duration: duration) else { return nil }
+                let name = step.displayName(language: .from(locale))
+                    ?? L10n.format("Fold %@", [String(index + 1)], language: .from(locale))
+                return VideoRangeMark(id: step.id, name: name, start: range.lowerBound, end: range.upperBound)
+            }
+            if !marks.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    SectionLabel(title: "Compare 3 frames").accessibilityAddTraits(.isHeader)
+                    ForEach(marks) { mark in
+                        Button {
+                            sheet = .frames(RangeFrameRequest(source: library.url(for: movie), mark: mark))
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                Text(verbatim: durationLabel(mark.start)).monospacedDigit()
+                                    .foregroundStyle(PulsePlayerStyle.secondary)
+                                    .environment(\.layoutDirection, .leftToRight)
+                                Text(verbatim: mark.name).multilineTextAlignment(.leading)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }.buttonStyle(PressStyle())
+                        Divider()
+                    }
+                }
             }
         }
     }
 
     private var sources: some View {
         VStack(spacing: 0) {
-            SheetHeading(title: "Choose a video") { sheet = nil }.disabled(importing)
+            SheetToolbar(context: "Choose a video") { sheet = nil }.disabled(importing)
             ScenePage { geometry in
                 VStack(alignment: .leading, spacing: 14) {
+                    if videos.isEmpty && library.error == nil {
+                        EmptyStateScene(appearance: .inline(.library), title: "No imported videos yet")
+                    }
                     VideoImportActions(onImported: choose, importing: $importing,
-                                       presentation: .sourcePair(stacked: PulsePlayerStyle.pageContentWidth(in: geometry) < 320))
+                                       presentation: .sources(stacked: PulsePlayerStyle.pageContentWidth(in: geometry) < 320))
                     ForEach(videos) { movie in
                         Button { choose(movie) } label: {
                             Text(verbatim: movie.displayFilename)
@@ -166,18 +208,18 @@ struct EditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     var initialMovie: PracticeRecording? = nil
     var initialTool: VideoTool = .studio
+    var pushed = false
     @StateObject private var departure = ExportDeparture()
     var body: some View {
-        EditorWorkspace(initialMovie: initialMovie, initialTool: initialTool) {
+        EditorWorkspace(initialMovie: initialMovie, initialTool: initialTool, pushed: pushed) {
             departure.request { dismiss() }
         }
             .environmentObject(departure)
             .modifier(ExportDepartureProtection(departure: departure))
+            .navigationBarBackButtonHidden(pushed)
     }
 }
 struct EditorWorkspace: View {
-    @EnvironmentObject private var commerce: CommerceStore
-    @State private var showingExportMembership = false
     @EnvironmentObject private var departure: ExportDeparture
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var ads: RewardedAds
@@ -185,6 +227,7 @@ struct EditorWorkspace: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @FocusState private var editingRangeName: Bool
     let initialTool: VideoTool
+    let pushed: Bool
     let close: () -> Void
     @StateObject private var editor = VideoEditor()
     @State private var selected: PracticeRecording?
@@ -224,16 +267,16 @@ struct EditorWorkspace: View {
         departure.running || editor.isExporting || editor.isPreparingPreview || sharingExport
     }
     private var canPlay: Bool {
-        scenePhase == .active && !ads.isPresenting && shareURL == nil
-            && !showingExportMembership && frameComparison == nil
+        scenePhase == .active && !ads.isPresenting && shareURL == nil && frameComparison == nil
     }
     private var operationError: String? {
         guard !departure.running else { return nil }
         return error ?? (editor.duration > 0 ? editor.error : nil)
     }
 
-    init(initialMovie: PracticeRecording? = nil, initialTool: VideoTool = .studio, close: @escaping () -> Void) {
+    init(initialMovie: PracticeRecording? = nil, initialTool: VideoTool = .studio, pushed: Bool, close: @escaping () -> Void) {
         self.initialTool = initialTool
+        self.pushed = pushed
         self.close = close
         _selected = State(initialValue: initialMovie)
         _stage = State(initialValue: (initialTool == .frame || initialTool == .speed) ? .adjustments : .interval)
@@ -288,7 +331,6 @@ struct EditorWorkspace: View {
             .dismissKeyboardOnOutsideTap($editingRangeName, scope: "editor-range-name")
             .interactiveDismissDisabled(importing || departure.running)
             .sheet(item: $shareURL) { ShareSheet(items: [$0.url]) }
-            .fullScreenCover(isPresented: $showingExportMembership) { MembershipView(entry: .media) }
             .fullScreenCover(isPresented: $showingFullScreenPreview, onDismiss: {
                 inlinePreviewAttached = true
             }) {
@@ -328,9 +370,8 @@ struct EditorWorkspace: View {
             .onChange(of: ads.isPresenting) { _, presenting in
                 if presenting { interruptPreview() } else { resumePreviewIfPossible() }
             }
-            .onChange(of: showingExportMembership) { _, presenting in if presenting { editor.preview.pause() } }
             .onDisappear {
-                guard !showingExportMembership, inlinePreviewAttached, shareURL == nil, frameComparison == nil else { return }
+                guard inlinePreviewAttached, shareURL == nil, frameComparison == nil else { return }
                 openedRequest = nil
                 editor.close()
                 exportTask?.cancel()
@@ -339,19 +380,25 @@ struct EditorWorkspace: View {
     }
 
     private var fileHeading: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 12) {
-                SceneTitle(selected == nil ? "Choose a video" : initialTool.title, size: 28)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                IconButton(symbol: .close, label: "Close", glass: true, action: close).disabled(importing)
+        HStack(alignment: .top, spacing: 8) {
+            if pushed {
+                IconButton(symbol: .back, label: "Back", glass: true, action: close)
+                    .disabled(importing)
             }
             if let selected {
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { sourceFile(selected); changeVideo.fixedSize() }
-                    VStack(alignment: .leading, spacing: 0) { sourceFile(selected); changeVideo }
+                    HStack(spacing: 10) { sourceFile(selected); changeVideo }.fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: 4) { sourceFile(selected); changeVideo }
                 }
             }
+            Spacer(minLength: 0)
+            if !pushed {
+                IconButton(symbol: .close, label: "Close", glass: true, action: close)
+                    .accessibilityValue(Text(LocalizedStringKey(selected == nil ? "Choose a video" : initialTool.title)))
+                    .disabled(importing)
+            }
         }
+        .pulsePlayerKeepControlsTogether()
     }
 
     private func sourceFile(_ movie: PracticeRecording) -> some View {
@@ -366,8 +413,11 @@ struct EditorWorkspace: View {
         let width = PulsePlayerStyle.pageContentWidth(in: container)
         let divided = PulsePlayerStyle.intersectsReservedRegion(CGRect(origin: .zero, size: container.size), in: container)
         return VStack(alignment: .leading, spacing: 14) {
+            if videos.isEmpty && library.error == nil {
+                EmptyStateScene(appearance: .inline(.library), title: "No imported videos yet")
+            }
             VideoImportActions(onImported: choose, importing: $importing,
-                               presentation: .sourcePair(stacked: width < 330 || divided || typeSize > .xLarge))
+                               presentation: .sources(stacked: width < 330 || divided || typeSize > .xLarge))
             if let error { ErrorNote(message: error).id("editor-feedback") }
             if let libraryError = library.error { ErrorNote(message: libraryError) }
             if !videos.isEmpty {
@@ -721,14 +771,13 @@ struct EditorWorkspace: View {
 
     private func shareExport(_ movie: PracticeRecording) {
         guard !sharingExport, !departure.running else { return }
-        guard commerce.canExportMedia else { showingExportMembership = true; return }
         editor.preview.pause()
         error = nil
         sharingExport = true
         shareTask = Task {
             defer { sharingExport = false; shareTask = nil }
             do {
-                let url = try await library.shareFile(for: movie, commerce: commerce)
+                let url = try await library.shareFile(for: movie)
                 if !Task.isCancelled { shareURL = SharedFile(url: url) }
             }
             catch is CancellationError { }
@@ -738,7 +787,6 @@ struct EditorWorkspace: View {
 
     private func export(audio: Bool, title: String) {
         guard exportTask == nil, !sharingExport else { return }
-        guard let authorization = try? commerce.requireMediaExport() else { showingExportMembership = true; return }
         error = nil
         exportTask = Task {
             defer { exportTask = nil; departure.finish() }
@@ -746,8 +794,7 @@ struct EditorWorkspace: View {
             if Task.isCancelled { try? FileManager.default.removeItem(at: output); return }
             do {
                 defer { try? FileManager.default.removeItem(at: output) }
-                let saved = try await library.saveExport(output, title: title + L10n.text(audio ? " · Audio" : " · Edit"),
-                                                         authorization: authorization, commerce: commerce)
+                let saved = try await library.saveExport(output, title: title + L10n.text(audio ? " · Audio" : " · Edit"))
                 if !Task.isCancelled { savedExport = saved }
             } catch is CancellationError { }
             catch { self.error = "The export finished but could not be added to your library. \(error.localizedDescription)" }
@@ -960,9 +1007,7 @@ private struct VideoRangePanel: View {
         let marks = (movie?.rangeMarks ?? []).filter { ($0.timeRange?.upperBound ?? .infinity) <= duration }
         return VStack(alignment: .leading, spacing: 12) {
             if marks.isEmpty && !saveAndLoop {
-                LocalizedText("Mark a range to loop it and compare frames.")
-                    .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                EmptyStateScene(appearance: .inline(.bookmark), message: "Mark a range to loop it and compare frames.")
             }
             makeRange
             if let error { ErrorNote(message: error) }
@@ -1182,7 +1227,7 @@ private struct RangeFrameComparison: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeading(title: "Compare 3 frames") { dismiss() }.disabled(exporting)
+            SheetToolbar(context: "Compare 3 frames") { dismiss() }.disabled(exporting)
             ScenePage { container in
                 VStack(alignment: .leading, spacing: 16) {
                     Text(verbatim: request.title(in: AppLanguage.from(locale)))
@@ -1291,33 +1336,22 @@ private struct RangeFrameComparison: View {
 private struct RangeShareActions: View {
     private enum Format { case comparison, stills }
 
-    @EnvironmentObject private var commerce: CommerceStore
     @Environment(\.locale) private var locale
     let request: RangeFrameRequest
     let frames: [RangeStill]
     @Binding var busy: Bool
     @State private var exportTask: Task<Void, Never>?
     @State private var exportError: String?
-    @State private var showingPlus = false
     @State private var sharedStills: SharedRangeStills?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             comparisonActions(request, frames: frames).disabled(busy)
-            exportNote
             if busy { AccountLoadingIndicator(title: "Preparing export…") }
             if let exportError { ErrorNote(message: exportError) }
         }
-        .fullScreenCover(isPresented: $showingPlus) { MembershipView(entry: .frameComparison) }
         .sheet(item: $sharedStills) { ShareSheet(items: $0.files) }
         .onDisappear { exportTask?.cancel() }
-    }
-
-    @ViewBuilder private var exportNote: some View {
-        if !commerce.hasVerifiedPlus {
-            LocalizedText("Export is included with Plus.").font(.capture(.footnote))
-                .foregroundStyle(PulsePlayerStyle.secondary).fixedSize(horizontal: false, vertical: true)
-        }
     }
 
     private func comparisonActions(_ request: RangeFrameRequest, frames: [RangeStill]) -> some View {
@@ -1345,24 +1379,20 @@ private struct RangeShareActions: View {
     private func export(_ request: RangeFrameRequest, frames: [RangeStill], format: Format) {
         guard !busy, exportTask == nil else { return }
         exportError = nil
-        guard let authorization = try? commerce.requireMediaExport() else { showingPlus = true; return }
         busy = true
         let language = AppLanguage.from(locale)
         exportTask = Task {
             defer { exportTask = nil; busy = false }
             var staged: SharedRangeStills?
             do {
-                try commerce.requireMediaExport(authorization)
                 try Task.checkCancellation()
                 let images = try imagesToShare(frames, request: request, language: language, format: format)
-                let credit = CraneChapter.filmCredit(for: request.source)
-                let writer = Task.detached(priority: .userInitiated) { try Self.stageJPEGs(images, credit: credit) }
+                let writer = Task.detached(priority: .userInitiated) { try Self.stageJPEGs(images) }
                 let result = try await withTaskCancellationHandler {
                     try await writer.value
                 } onCancel: { writer.cancel() }
                 staged = result
                 try Task.checkCancellation()
-                try commerce.requireMediaExport(authorization)
                 sharedStills = result
             } catch {
                 if let staged { try? FileManager.default.removeItem(at: staged.folder) }
@@ -1388,7 +1418,7 @@ private struct RangeShareActions: View {
         }
     }
 
-    nonisolated private static func stageJPEGs(_ images: [(name: String, image: CGImage)], credit: String?) throws -> SharedRangeStills {
+    nonisolated private static func stageJPEGs(_ images: [(name: String, image: CGImage)]) throws -> SharedRangeStills {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("PulsePlayerRangeStills", isDirectory: true)
         let folder = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1400,10 +1430,7 @@ private struct RangeShareActions: View {
             }
         }
         do {
-            var options: [String: Any] = [kCGImageDestinationLossyCompressionQuality as String: 0.92]
-            if let credit {
-                options[kCGImagePropertyTIFFDictionary as String] = [kCGImagePropertyTIFFImageDescription as String: credit]
-            }
+            let options: [String: Any] = [kCGImageDestinationLossyCompressionQuality as String: 0.92]
             var files: [URL] = []
             for image in images {
                 try Task.checkCancellation()
@@ -1612,22 +1639,20 @@ private struct EditorFilmstrip: View {
 
 struct VideoImportActions: View {
     enum Presentation: Equatable {
-        case standard, prominent
-        case library(stacked: Bool, photosFirst: Bool = false)
-        case sourcePair(stacked: Bool)
+        case menu(title: String)
+        case sources(stacked: Bool)
     }
 
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dynamicTypeSize) private var typeSize
     let onImported: (PracticeRecording) -> Void
     @Binding var importing: Bool
-    var presentation: Presentation = .standard
+    let presentation: Presentation
     var folderID: UUID? = nil
     @State private var photo: PhotosPickerItem?
     @State private var showingFiles = false
+    @State private var showingPhotos = false
     @State private var error: String?
-
-    private var prominent: Bool { presentation == .prominent }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1636,26 +1661,10 @@ struct VideoImportActions: View {
                     ProgressView().tint(PulsePlayerStyle.accent).accessibilityHidden(true)
                     LocalizedText("Importing…").font(.capture(.subheadline, weight: .semibold))
                 }.frame(minHeight: 48)
-            } else if case let .sourcePair(stacked) = presentation {
-                sourceStrip(stacked: stacked || typeSize > .xLarge)
-            } else if case let .library(stacked, photosFirst) = presentation {
-                sourceStrip(stacked: stacked || typeSize > .xLarge,
-                            photosFirst: photosFirst, compact: !photosFirst)
             } else {
-                let paired = prominent && !typeSize.isAccessibilitySize
-                let layout = paired ? AnyLayout(HStackLayout(spacing: 8))
-                                    : AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
-                PulsePlayerGlassGroup {
-                    layout {
-                        fileButton
-                        PhotosPicker(selection: $photo, matching: .videos, photoLibrary: .shared()) {
-                            photosLabel
-                                .frame(minHeight: prominent ? 78 : 48)
-                                .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 14))
-                        }.buttonStyle(PressStyle())
-                            .fixedSize(horizontal: paired, vertical: false)
-                            .accessibilityIdentifier("video.import.photos")
-                    }
+                switch presentation {
+                case .menu(let title): importMenu(title: title)
+                case .sources(let stacked): sourceButtons(stacked: stacked || typeSize > .xLarge)
                 }
             }
             if let error { ErrorNote(message: error) }
@@ -1666,6 +1675,7 @@ struct VideoImportActions: View {
                 importVideo { try await library.importMovie(url, folderID: folderID) }
             } catch { showImportError(error) }
         }
+        .photosPicker(isPresented: $showingPhotos, selection: $photo, matching: .videos, photoLibrary: .shared())
         .onChange(of: photo) { _, item in
             guard let item else { return }
             importVideo {
@@ -1679,94 +1689,65 @@ struct VideoImportActions: View {
         }
     }
 
-    private func sourceStrip(stacked: Bool, photosFirst: Bool = false, compact: Bool = false) -> some View {
-        let layout = stacked ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
-        let divider = Rectangle().fill(PulsePlayerStyle.line)
-            .frame(width: stacked ? nil : 1, height: stacked ? 1 : 24)
-            .accessibilityHidden(true)
-        let files = Button { showingFiles = true } label: {
-            sourceLabel("Files", glyph: .folder, primary: !photosFirst, stacked: stacked, compact: compact)
+    private func importMenu(title: String) -> some View {
+        GlassActionMenu(title: "Import a video", items: [
+            ActionMenuItem("Files", .folder, identifier: "video.import.files") { showingFiles = true },
+            ActionMenuItem("Photos", .feed, identifier: "video.import.photos") { showingPhotos = true }
+        ]) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 7) {
+                    Glyph(symbol: .folder, size: 17, tint: PulsePlayerStyle.accent)
+                    LocalizedText(title)
+                        .font(.capture(.subheadline, weight: .semibold))
+                        .lineLimit(1)
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                Glyph(symbol: .folder, size: 17, tint: PulsePlayerStyle.accent)
+            }
+            .foregroundStyle(PulsePlayerStyle.accent)
+            .padding(.horizontal, 12)
+            .frame(minWidth: 44, minHeight: 44)
+            .pulsePlayerGlass(in: Capsule(), fallback: PulsePlayerStyle.raised)
+            .contentShape(.interaction, Capsule())
         }
-        .buttonStyle(PressStyle())
-        .fixedSize(horizontal: !stacked && photosFirst, vertical: false)
-        .accessibilityLabel("Open video file")
-        .accessibilityIdentifier("video.import.files")
+        .accessibilityLabel(LocalizedStringKey("Import a video"))
+        .accessibilityIdentifier("video.import.menu")
+    }
 
-        let photos = PhotosPicker(selection: $photo, matching: .videos, photoLibrary: .shared()) {
-            sourceLabel(photosFirst ? "Choose from Photos" : "Photos", glyph: .feed,
-                        primary: photosFirst, stacked: stacked, compact: compact)
-        }
-        .buttonStyle(PressStyle())
-        .fixedSize(horizontal: !stacked && !photosFirst, vertical: false)
-        .accessibilityLabel("Choose from Photos")
-        .accessibilityIdentifier("video.import.photos")
-
+    private func sourceButtons(stacked: Bool) -> some View {
+        let layout = stacked ? AnyLayout(VStackLayout(spacing: 10)) : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
         return layout {
-            if photosFirst {
-                photos
-                divider
-                files
-            } else {
-                files
-                divider
-                photos
+            Button { showingFiles = true } label: {
+                sourceLabel("Files", symbol: .folder, stacked: stacked)
             }
-        }
-        .padding(compact ? 2 : 4)
-        .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 14), interactive: false)
-    }
-
-    private func sourceLabel(_ title: String, glyph: PulsePlayerGlyph, primary: Bool, stacked: Bool, compact: Bool) -> some View {
-        HStack(spacing: 8) {
-            LocalizedText(title).font(.capture(compact ? .footnote : .subheadline, weight: primary ? .semibold : .medium))
-                .fixedSize(horizontal: false, vertical: true)
-            if primary || stacked { Spacer(minLength: 4) }
-            Glyph(symbol: glyph, size: compact ? 15 : 19, tint: primary ? PulsePlayerStyle.accent : PulsePlayerStyle.secondary)
-        }
-        .padding(.horizontal, 12).padding(.vertical, compact ? 4 : 8)
-        .frame(minWidth: 44, minHeight: compact ? 36 : 46, alignment: .leading)
-        .foregroundStyle(PulsePlayerStyle.paper)
-        .background(primary ? PulsePlayerStyle.accent.opacity(0.105) : .clear,
-                    in: RoundedRectangle(cornerRadius: compact ? 10 : 14, style: .continuous))
-        .frame(minHeight: 44)
-        .contentShape(Rectangle())
-    }
-
-    private var fileButton: some View {
-        Button { showingFiles = true } label: {
-            HStack(spacing: 12) {
-                Glyph(symbol: .folder, size: prominent ? 24 : 18, tint: PulsePlayerStyle.ink)
-                    .frame(width: prominent ? 48 : 34, height: prominent ? 48 : 34)
-                    .background(PulsePlayerStyle.accent, in: RoundedRectangle(cornerRadius: 11))
-                VStack(alignment: .leading, spacing: 3) {
-                    LocalizedText(prominent ? "Open video" : "Open video file")
-                        .font(.capture(prominent ? .title2 : .subheadline, weight: .semibold, display: prominent))
-                    if prominent { LocalizedText("Files").font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary) }
-                }.fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .frame(minHeight: prominent ? 78 : 48)
-            .foregroundStyle(PulsePlayerStyle.paper)
-            .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 16), tint: PulsePlayerStyle.accent.opacity(0.10))
-            .contentShape(Rectangle())
-        }.buttonStyle(PressStyle())
+            .buttonStyle(PressStyle())
             .accessibilityLabel("Open video file")
             .accessibilityIdentifier("video.import.files")
+
+            PhotosPicker(selection: $photo, matching: .videos, photoLibrary: .shared()) {
+                sourceLabel("Photos", symbol: .feed, stacked: stacked)
+            }
+            .buttonStyle(PressStyle())
+            .accessibilityLabel("Choose from Photos")
+            .accessibilityIdentifier("video.import.photos")
+        }
+        .pulsePlayerKeepControlsTogether()
     }
 
-    private var photosLabel: some View {
-        let stacked = prominent && !typeSize.isAccessibilitySize
-        let layout = stacked ? AnyLayout(VStackLayout(spacing: 5)) : AnyLayout(HStackLayout(spacing: 10))
+    private func sourceLabel(_ title: String, symbol: PulsePlayerGlyph, stacked: Bool) -> some View {
+        let layout = stacked ? AnyLayout(HStackLayout(spacing: 12))
+                             : AnyLayout(VStackLayout(alignment: .leading, spacing: 14))
         return layout {
-            Glyph(symbol: .feed, size: stacked ? 23 : 18, tint: PulsePlayerStyle.accent)
-            LocalizedText(prominent ? "Photos" : "Choose from Photos")
-                .font(.capture(stacked ? .footnote : .subheadline, weight: .semibold))
+            Glyph(symbol: symbol, size: 22, tint: PulsePlayerStyle.accent)
+            LocalizedText(title).font(.capture(.subheadline, weight: .semibold))
+                .foregroundStyle(PulsePlayerStyle.paper)
+                .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: stacked ? nil : .infinity, alignment: .leading)
-        }.padding(.horizontal, 14).padding(.vertical, 8)
-            .frame(minWidth: stacked ? 80 : 44)
-            .foregroundStyle(PulsePlayerStyle.paper)
-            .contentShape(Rectangle())
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .frame(maxWidth: .infinity, minHeight: stacked ? 50 : 84, alignment: .leading)
+        .pulsePlayerGlass(in: .rect(cornerRadius: 18), fallback: PulsePlayerStyle.surface)
+        .contentShape(.interaction, .rect(cornerRadius: 18))
     }
 
     private func importVideo(_ operation: @escaping () async throws -> PracticeRecording) {
@@ -1898,6 +1879,27 @@ struct VideoFileButton: View {
                 Glyph(symbol: .back, size: 13, tint: PulsePlayerStyle.secondary).rotationEffect(.degrees(180))
             }
         }
+    }
+}
+
+struct FoldPracticeThumbnail: View {
+    let entry: FoldPracticeEntry
+    @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var offline: OfflineStore
+
+    var body: some View {
+        VideoFileThumbnail(url: source, fallbackCover: entry.clip.coverURL, timestamp: entry.resumeSeconds)
+            .id(entry.resumeSeconds)
+    }
+
+    private var source: URL {
+        switch entry.id {
+        case .movie(let id):
+            if let movie = library.movies.first(where: { $0.id == id }) { return library.url(for: movie) }
+        case .lesson(_, let owner, let clipID):
+            if let file = offline.cached(clipID), file.owner == owner { return file.url }
+        }
+        return entry.clip.playbackURL
     }
 }
 

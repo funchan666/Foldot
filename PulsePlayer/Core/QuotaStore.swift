@@ -20,11 +20,11 @@ enum WatchAdmission {
 
 enum PracticeWatchAccess: String {
     case replay = "Replay without using another view."
-    case plus = "This lesson is included with Plus."
+    case plus = "This video is included with Plus."
     case unlimited = "Unlimited viewing until the next reset."
-    case oneView = "Playing this lesson uses one view."
-    case pending = "This lesson is already opening."
-    case exhausted = "No views left for a new lesson today."
+    case oneView = "Playing this video uses one view."
+    case pending = "This video is already opening."
+    case exhausted = "No views left for new videos today."
     case checking = "Checking your viewing allowance…"
     case unavailable = "Your viewing allowance is unavailable."
 

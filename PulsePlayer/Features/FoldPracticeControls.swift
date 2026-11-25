@@ -1,27 +1,37 @@
 import SwiftUI
 
 struct FoldPracticeControls: View {
+    @Environment(\.locale) private var locale
     @ObservedObject private var notebook = FoldPracticeStore.shared
     let clip: LessonClip
     let identity: FoldPracticeID
     @ObservedObject var playback: PlaybackController
     let enabled: Bool
     let didInteract: () -> Void
+    let resumePlayback: () -> Void
     let showSteps: () -> Void
     @State private var feedback: String?
 
     var body: some View {
         let entry = notebook.entry(for: identity)
+        let range = entry.flatMap { entry in
+            entry.currentStep.flatMap { entry.loopRange(for: $0, duration: playback.timeline.duration) }
+        }
         VStack(alignment: .leading, spacing: 2) {
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    markButton
-                    Spacer(minLength: 4)
-                    stepsButton(entry)
+                HStack(spacing: 6) {
+                    markButton.fixedSize(horizontal: true, vertical: false)
+                    loopButton(range).fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 0)
+                    notesButton
                 }
                 VStack(alignment: .leading, spacing: 0) {
                     markButton
-                    stepsButton(entry)
+                    HStack(spacing: 6) {
+                        loopButton(range)
+                        Spacer(minLength: 0)
+                        notesButton
+                    }
                 }
             }
             if let message = feedback ?? playback.foldNotice ?? notebook.error {
@@ -59,28 +69,55 @@ struct FoldPracticeControls: View {
         .accessibilityIdentifier("practice.markFold")
     }
 
-    private func stepsButton(_ entry: FoldPracticeEntry?) -> some View {
+    @ViewBuilder private func loopButton(_ range: ClosedRange<Double>?) -> some View {
+        if let range, playback.foldGuide == nil {
+            let looping = playback.repeatedRange != nil
+            Button {
+                didInteract()
+                do {
+                    if looping {
+                        playback.stopRepeating()
+                    } else {
+                        try notebook.setFinished(false, in: identity)
+                        playback.prepareRepeat(range)
+                        if !playback.intendsPlayback { resumePlayback() }
+                    }
+                    feedback = nil
+                } catch { feedback = error.localizedDescription }
+            } label: {
+                LocalizedText(looping ? "Stop loop" : "Loop this fold")
+                    .font(.capture(.subheadline, weight: .semibold))
+                    .foregroundStyle(PulsePlayerStyle.mediaAccent)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, 6).frame(minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressStyle())
+            .disabled(!enabled || playback.error != nil)
+            .accessibilityIdentifier("practice.loopFold")
+        }
+    }
+
+    private var notesButton: some View {
         Button {
             feedback = nil
             showSteps()
         } label: {
-            Group {
-                if let entry, let guide = playback.foldGuide {
-                    LocalizedText("Fold %@ of %@ · play %@ of %@", String(entry.currentStepNumber), String(entry.steps.count),
-                                  String(guide.pass), String(guide.playsPerFold))
-                } else if let entry, playback.repeatedRange != nil {
-                    LocalizedText("Looping fold %@ of %@", String(entry.currentStepNumber), String(entry.steps.count))
-                } else {
-                    LocalizedText("Fold notes")
+            HStack(spacing: 6) {
+                if let guide = playback.foldGuide {
+                    LocalizedText("Play %@ of %@", String(guide.pass), String(guide.playsPerFold))
+                        .font(.capture(.subheadline)).monospacedDigit()
                 }
+                Glyph(symbol: .bookmark, size: 18, tint: PulsePlayerStyle.onDark)
             }
-            .font(.capture(.subheadline, weight: .medium))
-            .multilineTextAlignment(.leading)
-            .frame(minHeight: 44)
+            .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())
         }
-        .buttonStyle(PressStyle())
-        .disabled(!enabled)
+        .buttonStyle(PressStyle()).disabled(!enabled)
+        .accessibilityLabel(LocalizedStringKey("Fold notes"))
+        .accessibilityValue(Text(verbatim: playback.foldGuide.map {
+            L10n.format("Play %@ of %@", [String($0.pass), String($0.playsPerFold)], language: .from(locale))
+        } ?? ""))
         .accessibilityHint(LocalizedStringKey("Open the list of marked folds"))
         .accessibilityIdentifier("practice.openFolds")
     }
@@ -104,10 +141,58 @@ struct FoldPracticePanel: View {
         VStack(alignment: .leading, spacing: 8) {
             if let entry = notebook.entry(for: identity), let current = entry.currentStep {
                 let range = entry.loopRange(for: current, duration: playback.timeline.duration)
-                if range != nil {
-                    handsFreeControls
-                    Divider()
+                HStack(spacing: 12) {
+                    action("Play from this fold") {
+                        perform {
+                            try notebook.setFinished(false, in: identity)
+                            playback.stopRepeating()
+                            playback.seek(current.start)
+                            close(true)
+                        }
+                    }
+                    GlassActionMenu(title: "Fold notes", onDark: true, items: foldActions(entry, current: current)) {
+                        LocalizedText("More").font(.capture(.subheadline, weight: .semibold))
+                            .foregroundStyle(PulsePlayerStyle.mediaAccent)
+                            .padding(.horizontal, 10).frame(minWidth: 44, minHeight: 44)
+                    }
                 }
+                if editingName {
+                    TextField(L10n.text("Fold name", language: .from(locale)), text: $draft)
+                        .textFieldStyle(.plain).font(.capture(.body)).padding(12)
+                        .background(PulsePlayerStyle.onDark.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                        .submitLabel(.done)
+                        .onSubmit { saveName() }
+                    action("Save name", perform: saveName)
+                }
+                if let range {
+                    if playback.foldGuide == nil {
+                        let looping = playback.repeatedRange != nil
+                        Button {
+                            perform {
+                                if looping {
+                                    playback.stopRepeating()
+                                } else {
+                                    try notebook.setFinished(false, in: identity)
+                                    playback.prepareRepeat(range)
+                                }
+                                close(true)
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                LocalizedText(looping ? "Stop loop" : "Loop this fold")
+                                    .font(.capture(.subheadline, weight: .semibold))
+                                    .foregroundStyle(PulsePlayerStyle.mediaAccent)
+                                Spacer(minLength: 0)
+                                Text(verbatim: durationLabel(range.lowerBound, fractional: true) + " – " +
+                                     durationLabel(range.upperBound, fractional: true))
+                                    .monospacedDigit().font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.mediaSecondary)
+                            }
+                            .frame(minHeight: 44).contentShape(Rectangle())
+                        }.buttonStyle(PressStyle())
+                    }
+                    handsFreeControls
+                }
+                Divider()
                 ForEach(Array(entry.steps.enumerated()), id: \.element.id) { index, step in
                     let selected = step.id == current.id
                     Button {
@@ -119,17 +204,19 @@ struct FoldPracticePanel: View {
                         }
                     } label: {
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                LocalizedText("Fold %@", String(index + 1)).font(.capture(.subheadline, weight: .semibold))
+                            Group {
                                 if let name = step.displayName(language: .from(locale)) {
-                                    Text(verbatim: name).font(.capture(.footnote))
-                                }
-                                if selected {
-                                    LocalizedText(entry.finishedAt == nil ? "Resume here" : "Completed")
-                                        .font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.mediaAccent)
+                                    Text(verbatim: name)
+                                } else {
+                                    LocalizedText("Fold %@", String(index + 1))
                                 }
                             }
+                            .font(.capture(.subheadline, weight: selected ? .semibold : .regular))
+                            .foregroundStyle(selected ? PulsePlayerStyle.mediaAccent : PulsePlayerStyle.onDark)
                             Spacer(minLength: 8)
+                            if selected {
+                                Glyph(symbol: .bookmark, size: 13, tint: PulsePlayerStyle.mediaAccent)
+                            }
                             Text(verbatim: durationLabel(step.start, fractional: true))
                                 .font(.capture(.footnote)).monospacedDigit()
                         }
@@ -138,81 +225,59 @@ struct FoldPracticePanel: View {
                     }
                     .buttonStyle(PressStyle())
                     .accessibilityAddTraits(selected ? .isSelected : [])
+                    .accessibilityValue(selected ? Text(LocalizedStringKey(entry.finishedAt == nil ? "Resume here" : "Completed")) : Text(verbatim: ""))
                     Divider()
                 }
 
-                if let range, playback.foldGuide == nil {
-                    let limits = durationLabel(range.lowerBound, fractional: true) + " – " + durationLabel(range.upperBound, fractional: true)
-                    LocalizedText("Fold loop · %@", limits)
-                        .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.mediaSecondary)
-                        .padding(.top, 8)
-                    if playback.repeatedRange != nil {
-                        action("Stop loop") {
-                            playback.stopRepeating()
-                            close(true)
-                        }
-                    } else {
-                        action("Loop this fold") {
-                            perform {
-                                try notebook.setFinished(false, in: identity)
-                                playback.prepareRepeat(range)
-                                close(true)
-                            }
-                        }
-                    }
-                }
-                action("Set loop end here") {
-                    perform {
-                        guard let position = playback.foldPosition else {
-                            throw PulsePlayerError.service("Wait for the video to finish seeking.")
-                        }
-                        try notebook.updateEnd(in: identity, at: position, duration: playback.timeline.duration)
-                        playback.stopRepeating()
-                    }
-                }
-                action("Play from this fold") {
-                    perform {
-                        try notebook.setFinished(false, in: identity)
-                        playback.stopRepeating()
-                        playback.seek(current.start)
-                        close(true)
-                    }
-                }
-                Divider()
-                if editingName {
-                    TextField(L10n.text("Fold name", language: .from(locale)), text: $draft)
-                        .textFieldStyle(.plain).font(.capture(.body)).padding(12)
-                        .background(PulsePlayerStyle.onDark.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
-                        .submitLabel(.done)
-                        .onSubmit { saveName() }
-                    action("Save name", perform: saveName)
-                } else {
-                    action("Name this fold") {
-                        draft = current.displayName(language: .from(locale)) ?? ""
-                        editingName = true
-                    }
-                }
-                action("Undo last mark") {
-                    perform {
-                        try notebook.undoLastMark(in: identity)
-                        playback.stopRepeating()
-                        editingName = false
-                    }
-                }
-                action(entry.finishedAt == nil ? "Finish practice" : "Reopen practice") {
-                    perform {
-                        try notebook.setFinished(entry.finishedAt == nil, in: identity)
-                        playback.stopRepeating()
-                        close(false)
-                    }
-                }
             } else {
-                LocalizedText("When a fold begins, tap Mark this fold in the player. Your marks are saved on this device.")
-                    .font(.capture(.body)).fixedSize(horizontal: false, vertical: true)
+                EmptyStateScene(appearance: .notebook,
+                                message: "When a fold begins, tap Mark this fold in the player. Your marks are saved on this device.",
+                                onMedia: true)
             }
             if let message = feedback ?? notebook.error {
                 LocalizedText(message).font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.mediaSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func foldActions(_ entry: FoldPracticeEntry, current: FoldPracticeStep) -> [ActionMenuItem] {
+        [
+            ActionMenuItem("Set loop end here", .bookmark) {
+                perform {
+                    guard let position = playback.foldPosition else {
+                        throw PulsePlayerError.service("Wait for the video to finish seeking.")
+                    }
+                    try notebook.updateEnd(in: identity, at: position, duration: playback.timeline.duration)
+                    playback.stopRepeating()
+                }
+            },
+            ActionMenuItem("Name this fold", .edit) {
+                draft = current.displayName(language: .from(locale)) ?? ""
+                editingName = true
+            },
+            ActionMenuItem(entry.finishedAt == nil ? "Finish practice" : "Reopen practice", .fold) {
+                perform {
+                    try notebook.setFinished(entry.finishedAt == nil, in: identity)
+                    playback.stopRepeating()
+                    close(false)
+                }
+            },
+            ActionMenuItem("Undo last mark", .back, destructive: true) {
+                perform {
+                    try notebook.undoLastMark(in: identity)
+                    playback.stopRepeating()
+                    editingName = false
+                }
+            }
+        ]
+    }
+
+    private var repeatChoices: [ActionMenuItem] {
+        FoldGuidePlayback.playCounts.map { count in
+            let title = L10n.format("Plays per fold · %@", [count.formatted(.number.locale(locale))], language: .from(locale))
+            return ActionMenuItem(title, .play, selected: plays == count, identifier: "practice.guide.plays.\(count)") {
+                storedPlays = count
             }
         }
     }
@@ -227,34 +292,27 @@ struct FoldPracticePanel: View {
             }
             .accessibilityIdentifier("practice.guide.stop")
         } else {
-            LocalizedText("Plays per fold").font(.capture(.subheadline, weight: .semibold))
             HStack(spacing: 8) {
-                ForEach(FoldGuidePlayback.playCounts, id: \.self) { count in
-                    let selected = plays == count
-                    let number = count.formatted(.number.locale(locale))
-                    Button { storedPlays = count } label: {
-                        Text(verbatim: number)
-                            .font(.capture(.body, weight: selected ? .bold : .medium))
-                            .foregroundStyle(selected ? PulsePlayerStyle.mediaBackdrop : PulsePlayerStyle.onDark)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .background(selected ? PulsePlayerStyle.mediaAccent : PulsePlayerStyle.onDark.opacity(0.12), in: Capsule())
+                action("Play folds hands-free") {
+                    perform {
+                        try playback.prepareFoldGuide(for: identity, playsPerFold: plays)
+                        close(true)
                     }
-                    .buttonStyle(PressStyle())
-                    .accessibilityLabel(Text(verbatim: L10n.format("Plays per fold · %@", [number], language: .from(locale))))
-                    .accessibilityAddTraits(selected ? .isSelected : [])
-                    .accessibilityIdentifier("practice.guide.plays.\(count)")
                 }
-            }
-            action("Play folds hands-free") {
-                perform {
-                    try playback.prepareFoldGuide(for: identity, playsPerFold: plays)
-                    close(true)
+                .accessibilityHint(LocalizedStringKey("The video starts at this fold and pauses after the last one."))
+                .accessibilityIdentifier("practice.guide.start")
+                GlassActionMenu(title: "Plays per fold", onDark: true, items: repeatChoices) {
+                    HStack(spacing: 6) {
+                        Text(verbatim: "×" + plays.formatted(.number.locale(locale)))
+                            .font(.capture(.subheadline, weight: .semibold)).monospacedDigit()
+                        Glyph(symbol: .back, size: 9, tint: PulsePlayerStyle.mediaAccent)
+                            .environment(\.layoutDirection, .leftToRight).rotationEffect(.degrees(-90))
+                    }
+                    .padding(.horizontal, 8).frame(minWidth: 44, minHeight: 44)
                 }
+                .accessibilityLabel(LocalizedStringKey("Plays per fold"))
+                .accessibilityValue(Text(verbatim: plays.formatted(.number.locale(locale))))
             }
-            .accessibilityIdentifier("practice.guide.start")
-            LocalizedText("The video starts at this fold and pauses after the last one.")
-                .font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.mediaSecondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
