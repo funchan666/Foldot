@@ -268,6 +268,10 @@ struct FoldingDeskView: View {
 
 struct FoldPracticeRow: View {
     @Environment(\.locale) private var locale
+    @EnvironmentObject private var api: APIClient
+    @EnvironmentObject private var commerce: CommerceStore
+    @EnvironmentObject private var offline: OfflineStore
+    @EnvironmentObject private var quota: QuotaStore
     let entry: FoldPracticeEntry
     var featured = false
     let open: () -> Void
@@ -284,6 +288,16 @@ struct FoldPracticeRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let name = entry.currentStep?.displayName(language: .from(locale)) {
                     Text(verbatim: name).font(.capture(.body)).foregroundStyle(PulsePlayerStyle.paper)
+                }
+                if case let .lesson(_, owner, videoID) = entry.id,
+                   owner == api.session?.userId.value, videoID == entry.clip.id,
+                   !entry.clip.playbackURL.isFileURL, offline.cached(videoID) == nil {
+                    TimelineView(.everyMinute) { clock in
+                        let access = quota.watchAccess(to: videoID, premium: commerce.premium, owner: owner, at: clock.date)
+                        LocalizedText(access.rawValue)
+                            .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 HStack(alignment: .center, spacing: 8) {
                     LocalizedText(entry.finishedAt == nil ? "Resume at %@" : "Review from %@",

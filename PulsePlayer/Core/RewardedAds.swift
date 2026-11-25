@@ -22,12 +22,24 @@ final class RewardedAds: NSObject, ObservableObject, FullScreenContentDelegate {
     private var startupStarted = false
     @Published private(set) var isPreparingAppOpen = false
     private var appOpenTask: Task<Void, Never>?
-    private var appOpenPreloadTask: Task<Void, Error>?
-    private var preloadUnitID: String?
-    private var preloadRequestID: UUID?
-    private var preparedAppOpen: AppOpenAd?
-    private var preparedAppOpenDate: Date?
-    private var preparedUnitID: String?
+    private struct OpeningCreative {
+        let ad: AppOpenAd
+        let unitID: String
+        let received: Date
+
+        func ad(for requestedUnit: String) -> AppOpenAd? {
+            let age = Date().timeIntervalSince(received)
+            return requestedUnit == unitID && (0..<14_400).contains(age) ? ad : nil
+        }
+    }
+    private struct OpeningLoad {
+        let id: UUID
+        let unitID: String
+        let task: Task<Void, Error>
+    }
+    private var inventory: OpeningCreative?
+    private var loadingInventory: OpeningLoad?
+    private var visiblePracticeScreens = Set<UUID>()
     private var presentedPlacement: GoogleAdPlacement?
     private let appOpenLog = Logger(subsystem: "app.pulseplayer", category: "AppOpen")
     private let privacyLog = Logger(subsystem: "app.pulseplayer", category: "AdPrivacy")
@@ -237,62 +249,45 @@ final class RewardedAds: NSObject, ObservableObject, FullScreenContentDelegate {
     }
 
     private func clearAppOpenInventory() {
-        appOpenPreloadTask?.cancel()
-        appOpenPreloadTask = nil
-        preloadUnitID = nil
-        preloadRequestID = nil
-        preparedAppOpen = nil
-        preparedAppOpenDate = nil
-        preparedUnitID = nil
+        loadingInventory?.task.cancel()
+        loadingInventory = nil
+        inventory = nil
     }
 
     private func preloadAppOpen(_ placement: GoogleAdPlacement) async throws {
         try Task.checkCancellation()
         try prepareSDK(demoMode: placement.isOfficialDemo)
         let unitID = placement.unitID
-        if preparedUnitID == unitID, preparedAppOpen != nil, let date = preparedAppOpenDate,
-           Date().timeIntervalSince(date) >= 0, Date().timeIntervalSince(date) < 4 * 60 * 60 {
-            appOpenLog.info("Using preloaded app-open ad")
-            return
-        }
-        if let task = appOpenPreloadTask, preloadUnitID == unitID {
-            try await task.value
+        if inventory?.ad(for: unitID) != nil { return }
+        if let load = loadingInventory, load.unitID == unitID {
+            try await load.task.value
             return
         }
         clearAppOpenInventory()
-        preloadUnitID = unitID
         let requestID = UUID()
-        preloadRequestID = requestID
-        // This task belongs to the inventory cache, not a splash-screen deadline.
         let task = Task<Void, Error> { @MainActor [weak self] in
-            let began = ContinuousClock.now
-            do {
-                try Task.checkCancellation()
-                guard let self, self.canRequestAds(demoMode: placement.isOfficialDemo) else { throw CancellationError() }
-                let ad = try await AppOpenAd.load(with: unitID, request: Request())
-                try Task.checkCancellation()
-                guard self.preloadRequestID == requestID,
-                      self.canRequestAds(demoMode: placement.isOfficialDemo) else { throw CancellationError() }
-                self.preparedAppOpen = ad
-                self.preparedAppOpenDate = Date()
-                self.preparedUnitID = unitID
-                self.appOpenPreloadTask = nil
-                self.preloadUnitID = nil
-                self.preloadRequestID = nil
-                self.appOpenLog.notice("App-open inventory ready after \(began.duration(to: .now).description, privacy: .public)")
-            } catch {
-                if let self, self.preloadRequestID == requestID {
-                    self.appOpenPreloadTask = nil
-                    self.preloadUnitID = nil
-                    self.preloadRequestID = nil
-                    let failure = error as NSError
-                    self.appOpenLog.error("App-open inventory failed; domain=\(failure.domain, privacy: .public), code=\(failure.code)")
-                }
-                throw error
-            }
+            guard let self else { throw CancellationError() }
+            defer { if self.loadingInventory?.id == requestID { self.loadingInventory = nil } }
+            try Task.checkCancellation()
+            guard self.canRequestAds(demoMode: placement.isOfficialDemo) else { throw CancellationError() }
+            let ad = try await AppOpenAd.load(with: unitID, request: Request())
+            try Task.checkCancellation()
+            guard self.loadingInventory?.id == requestID,
+                  self.canRequestAds(demoMode: placement.isOfficialDemo) else { throw CancellationError() }
+            self.inventory = OpeningCreative(ad: ad, unitID: unitID, received: Date())
         }
-        appOpenPreloadTask = task
+        loadingInventory = OpeningLoad(id: requestID, unitID: unitID, task: task)
         try await task.value
+    }
+
+    /// Returning to a marked fold resumes practice. The next ordinary foreground event can use the cached ad.
+    func setPracticeVisible(_ visible: Bool, screen: UUID) {
+        if visible {
+            visiblePracticeScreens.insert(screen)
+            if startupFinished && isPreparingAppOpen { finishAppOpen(reason: "resuming-practice") }
+        } else {
+            visiblePracticeScreens.remove(screen)
+        }
     }
 
     // Cold start includes pre-login guest preparation. Foreground returns use the same gate.
@@ -314,6 +309,7 @@ final class RewardedAds: NSObject, ObservableObject, FullScreenContentDelegate {
         if !busy { startConsentFlowIfNeeded(commerce: commerce, accountAccess: accountAccess) }
         guard returnedFromBackground else { return }
         returnedFromBackground = false
+        guard visiblePracticeScreens.isEmpty else { return }
         requestAppOpen(commerce: commerce, accountAccess: accountAccess, coldStart: false)
     }
 
@@ -390,24 +386,21 @@ final class RewardedAds: NSObject, ObservableObject, FullScreenContentDelegate {
                       commerce.verifiedCurrentAccount, !commerce.premium, UIApplication.shared.applicationState == .active,
                       !self.busy, !self.isPresenting, self.canRequestAds(demoMode: placement.isOfficialDemo),
                       !commerce.busy, !commerce.preparingPurchase,
-                      !accountAccess.isBusy, self.preparedUnitID == unitID, let ad = self.preparedAppOpen,
+                      !accountAccess.isBusy, coldStart || self.visiblePracticeScreens.isEmpty,
+                      let ad = self.inventory?.ad(for: unitID),
                       AppOpenTiming.isDue(intervalMinutes: interval,
                         lastShown: UserDefaults.standard.object(forKey: key) as? Date) else {
                     self.finishAppOpen(attempt: attempt, reason: "conditions-changed"); return
                 }
                 do { try ad.canPresent(from: nil) }
                 catch {
-                    self.preparedAppOpen = nil
-                    self.preparedAppOpenDate = nil
-                    self.preparedUnitID = nil
+                    self.inventory = nil
                     let failure = error as NSError
                     self.appOpenLog.error("App-open presenter unavailable; domain=\(failure.domain, privacy: .public), code=\(failure.code)")
                     self.finishAppOpen(attempt: attempt, reason: "presenter-unavailable")
                     return
                 }
-                self.preparedAppOpen = nil
-                self.preparedAppOpenDate = nil
-                self.preparedUnitID = nil
+                self.inventory = nil
                 self.presentedPlacement = placement
                 self.appOpenStage = "presenting"
                 self.appOpenLog.info("App-open ad ready; presenting")

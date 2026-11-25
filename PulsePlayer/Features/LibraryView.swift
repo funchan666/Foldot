@@ -6,6 +6,7 @@ struct LibraryView: View {
     @ObservedObject private var practice = FoldPracticeStore.shared
     @State private var showingNotebook = false
     @State private var lastFileCollection = Category.imports
+    @State private var choosingFileCollection = false
     @FocusState private var findingFold: Bool
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var offline: OfflineStore
@@ -22,7 +23,6 @@ struct LibraryView: View {
     @Binding var importing: Bool
     @Binding var engaged: Bool
     @State private var player: PlayerRoute?
-    @State private var foldPlaybackOwner: String?
     @State private var sharing: SharedFile?
     @State private var removing: PracticeRecording?
     @State private var removingDownload: OfflineVideo?
@@ -145,20 +145,15 @@ struct LibraryView: View {
             .sheet(isPresented: $showingNotebook) { FoldNotebookView() }
             .onChange(of: filter) { _, value in
                 expandedMovieActionsID = nil
+                choosingFileCollection = false
                 findingFold = false
                 if let collection = Category(rawValue: value) { lastFileCollection = collection }
                 if value != Category.folders.rawValue { selectedFolderID = nil }
             }
             .onChange(of: library.listRequest) { _, _ in expandedMovieActionsID = nil }
             .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
-            .fullScreenCover(isPresented: $showingExportMembership) { MembershipView(exportRequired: true) }
-            .fullScreenCover(item: $player, onDismiss: { foldPlaybackOwner = nil }) { PlayerScreen(route: $0) }
-            .onChange(of: api.offlineOwnerID) { _, owner in
-                if let foldPlaybackOwner, foldPlaybackOwner != owner {
-                    player = nil
-                    self.foldPlaybackOwner = nil
-                }
-            }
+            .fullScreenCover(isPresented: $showingExportMembership) { MembershipView(entry: .media) }
+            .fullScreenCover(item: $player) { PlayerScreen(route: $0) }
             .sheet(item: $folderAction) { action in folderSheet(action) }
             .sheet(item: $removingDownload) { video in
                 ScrollView {
@@ -245,7 +240,6 @@ struct LibraryView: View {
         do {
             try practice.select(step, in: id, reopen: false)
             findingFold = false
-            if case .lesson(_, let owner, _) = id { foldPlaybackOwner = owner }
             player = route
         } catch { library.error = error.localizedDescription }
     }
@@ -279,37 +273,12 @@ struct LibraryView: View {
 
     private func libraryContents(in container: GeometryProxy, width: CGFloat) -> some View {
         let bounds = CGRect(origin: .zero, size: container.size)
-        let usesSidebar = width >= 540 && typeSize <= .xLarge && !PulsePlayerStyle.intersectsReservedRegion(bounds, in: container)
-        let layout = usesSidebar ? AnyLayout(HStackLayout(alignment: .top, spacing: 22))
-                                 : AnyLayout(VStackLayout(alignment: .leading, spacing: 16))
-        return layout {
-            if usesSidebar {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Category.allCases) { entry in
-                        Button { filter = entry.rawValue } label: {
-                            HStack(spacing: 6) {
-                                LocalizedText(entry.title)
-                                    .font(.capture(.subheadline, weight: entry == category ? .bold : .regular))
-                                Spacer(minLength: 2)
-                                Text(count(in: entry), format: .number)
-                                    .font(.capture(.footnote)).monospacedDigit()
-                            }
-                            .padding(.horizontal, 8).frame(minHeight: 44)
-                            .foregroundStyle(entry == category ? PulsePlayerStyle.accent : PulsePlayerStyle.paper)
-                            .background(entry == category ? PulsePlayerStyle.mist : .clear, in: .rect(cornerRadius: 8))
-                            .contentShape(Rectangle())
-                        }.buttonStyle(PressStyle())
-                        .accessibilityAddTraits(entry == category ? .isSelected : [])
-                    }
-                }.frame(width: 148)
-            } else {
-                Menu {
-                    ForEach(Category.allCases) { entry in
-                        Button { filter = entry.rawValue } label: {
-                            LocalizedText("%@ (%@)", L10n.text(entry.title), count(in: entry).formatted())
-                        }.accessibilityAddTraits(entry == category ? .isSelected : [])
-                    }
-                } label: {
+        let divided = PulsePlayerStyle.intersectsReservedRegion(bounds, in: container)
+        let showsCollections = width >= 540 && typeSize <= .xLarge && !divided
+        let gridItem = typeSize.isAccessibilitySize || divided ? GridItem(.flexible()) : GridItem(.adaptive(minimum: 140))
+        return VStack(alignment: .leading, spacing: 12) {
+            if !showsCollections {
+                Button { choosingFileCollection.toggle() } label: {
                     HStack(spacing: 10) {
                         LocalizedText(category.title).font(.capture(.headline, weight: .semibold))
                         Text(count(in: category), format: .number)
@@ -317,16 +286,44 @@ struct LibraryView: View {
                         Spacer(minLength: 0)
                         LocalizedText("Collections").font(.capture(.footnote, weight: .medium))
                             .foregroundStyle(PulsePlayerStyle.accent)
-                        Glyph(symbol: .back, size: 10, tint: PulsePlayerStyle.accent).rotationEffect(.degrees(-90))
+                        Glyph(symbol: .back, size: 10, tint: PulsePlayerStyle.accent)
+                            .environment(\.layoutDirection, .leftToRight)
+                            .rotationEffect(.degrees(choosingFileCollection ? 90 : -90))
                     }
                     .padding(.horizontal, 14).padding(.vertical, 4)
                     .frame(minHeight: 48)
                     .pulsePlayerGlass(in: .rect(cornerRadius: 12))
                 }
+                .buttonStyle(PressStyle())
                 .accessibilityHint("Choose a library collection")
                 .pulsePlayerKeepControlsTogether()
             }
-            librarySection(stackedRows: (usesSidebar ? width - 170 : width) < 310 || typeSize.isAccessibilitySize)
+            if showsCollections || choosingFileCollection {
+                LazyVGrid(columns: [gridItem], spacing: 3) {
+                    ForEach(Category.allCases) { entry in
+                        Button {
+                            filter = entry.rawValue
+                            choosingFileCollection = false
+                        } label: {
+                            HStack(spacing: 6) {
+                                LocalizedText(entry.title).font(.capture(.subheadline, weight: .medium))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Spacer(minLength: 2)
+                                Text(count(in: entry), format: .number).monospacedDigit().font(.capture(.caption))
+                            }
+                            .padding(.horizontal, 10).frame(minHeight: 44)
+                            .foregroundStyle(entry == category ? PulsePlayerStyle.accent : PulsePlayerStyle.paper)
+                            .background(entry == category ? PulsePlayerStyle.mist : .clear, in: .rect(cornerRadius: 8))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(PressStyle())
+                        .accessibilityAddTraits(entry == category ? .isSelected : [])
+                        .pulsePlayerKeepControlsTogether()
+                    }
+                }
+                Divider()
+            }
+            librarySection(stackedRows: width < 310 || typeSize.isAccessibilitySize || divided)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -834,6 +831,14 @@ private struct FoldLibraryIndex: View {
             case .finished: entry.finishedAt != nil
             }
         }
+
+        var emptyTitle: String {
+            switch self {
+            case .all: "No folds marked yet"
+            case .underway: "No sessions in progress"
+            case .finished: "No completed sessions yet"
+            }
+        }
     }
 
     private struct Mark: Identifiable {
@@ -883,7 +888,7 @@ private struct FoldLibraryIndex: View {
                 statusFilter
                 let matches = results
                 if matches.isEmpty {
-                    EmptyStateScene(title: searching ? "No matching folds" : "No sessions with this status")
+                    EmptyStateScene(title: searching ? "No matching folds" : status.emptyTitle)
                     Button {
                         query = ""
                         status = .all
@@ -1163,7 +1168,7 @@ struct VideoExportEntry<Trigger: View>: View {
             .fullScreenCover(isPresented: $showingMembership, onDismiss: {
                 if commerce.canExportMedia { showingExport = true }
             }) {
-                MembershipView(exportRequired: true)
+                MembershipView(entry: .media)
             }
     }
 
@@ -1298,7 +1303,6 @@ private struct OfflineExportButton: View {
     @EnvironmentObject private var departure: ExportDeparture
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var offline: OfflineStore
-    @EnvironmentObject private var quota: QuotaStore
     @EnvironmentObject private var commerce: CommerceStore
     @State private var downloadGate = false
     @State private var preparingSource = false
@@ -1332,7 +1336,7 @@ private struct OfflineExportButton: View {
             if let exportError { ErrorNote(message: exportError) }
         }
         .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
-        .fullScreenCover(isPresented: $downloadGate) { MembershipView(exportRequired: true) }
+        .fullScreenCover(isPresented: $downloadGate) { MembershipView(entry: .media) }
         .onDisappear { exportTask?.cancel() }
     }
 
@@ -1352,21 +1356,15 @@ private struct OfflineExportButton: View {
 
     private func startExport() {
         guard exportTask == nil else { return }
-        guard commerce.canExportMedia else { downloadGate = true; return }
-        if !clip.playbackURL.isFileURL, offline.cached(clip.id) == nil,
-           !quota.mayDownload(clip.id, premium: commerce.premium) {
-            downloadGate = true
-            return
-        }
+        guard let authorization = try? commerce.requireMediaExport() else { downloadGate = true; return }
         exportError = nil
         exportTask = Task { @MainActor in
             defer { exportTask = nil; preparingSource = false; departure.finish() }
-            let owner = commerce.api.session?.userId.value
             var converted: URL?
             defer { if let converted { try? FileManager.default.removeItem(at: converted) } }
             do {
                 preparingSource = true
-                let source = try await offline.editableSource(for: clip)
+                let source = try await offline.editableSource(for: clip, authorization: authorization)
                 preparingSource = false
                 var output = source
                 if !["mp4", "mov", "m4v"].contains(source.pathExtension.lowercased()) {
@@ -1378,25 +1376,11 @@ private struct OfflineExportButton: View {
                     let destination = FileManager.default.temporaryDirectory
                         .appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
                     converted = destination
-                    session.outputURL = destination
-                    session.outputFileType = .mp4
-                    await withTaskCancellationHandler {
-                        await withCheckedContinuation { continuation in
-                            session.exportAsynchronously { continuation.resume() }
-                        }
-                    } onCancel: { session.cancelExport() }
-                    try Task.checkCancellation()
-                    guard session.status == .completed else {
-                        throw PulsePlayerError.service("Video export failed. Please try again.")
-                    }
+                    try await VideoEditor.write(session, to: destination, as: .mp4)
                     output = destination
                 }
                 try Task.checkCancellation()
-                try commerce.requireMediaExport()
-                let recording = try await library.importMovie(output, exported: true, title: clip.title) {
-                    try commerce.requireMediaExport()
-                    guard owner == commerce.api.session?.userId.value else { throw PulsePlayerError.unauthorized }
-                }
+                let recording = try await library.saveExport(output, title: clip.title, authorization: authorization, commerce: commerce)
                 if !Task.isCancelled { savedExport = recording }
             } catch is CancellationError { }
             catch {

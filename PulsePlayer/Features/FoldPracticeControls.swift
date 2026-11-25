@@ -68,9 +68,8 @@ struct FoldPracticeControls: View {
                 if let entry, let guide = playback.foldGuide {
                     LocalizedText("Fold %@ of %@ · play %@ of %@", String(entry.currentStepNumber), String(entry.steps.count),
                                   String(guide.pass), String(guide.playsPerFold))
-                } else if let entry {
-                    LocalizedText(playback.repeatedRange == nil ? "Fold %@ of %@" : "Looping fold %@ of %@",
-                                  String(entry.currentStepNumber), String(entry.steps.count))
+                } else if let entry, playback.repeatedRange != nil {
+                    LocalizedText("Looping fold %@ of %@", String(entry.currentStepNumber), String(entry.steps.count))
                 } else {
                     LocalizedText("Fold notes")
                 }

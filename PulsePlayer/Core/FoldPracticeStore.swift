@@ -26,6 +26,11 @@ struct CraneChapter: Identifiable {
     var id: Double { start }
 
     static let filmDuration: Double = 335
+    static func filmCredit(for source: URL) -> String? {
+        guard let film = Bundle.main.url(forResource: "PaperCrane", withExtension: "mp4"),
+              source.standardizedFileURL == film.standardizedFileURL else { return nil }
+        return "Adapted from OrigamiCrane by Tavin (2010). https://commons.wikimedia.org/wiki/File:OrigamiCrane.ogv • CC BY 3.0 https://creativecommons.org/licenses/by/3.0/"
+    }
     static let guide = [
         Self(start: 0, title: "Fold the square in half both ways"),
         Self(start: 33, title: "Crease both diagonals"),
@@ -47,6 +52,7 @@ struct FoldPracticeEntry: Codable, Identifiable {
     var updatedAt: Date
     var finishedAt: Date?
     var duration: Double?
+    var craneGuideRevision: Int?
 
     var currentStepNumber: Int { (steps.firstIndex(where: { $0.id == selectedID }) ?? 0) + 1 }
     var currentStep: FoldPracticeStep? { steps.first { $0.id == selectedID } }
@@ -199,10 +205,10 @@ final class FoldPracticeStore: ObservableObject {
     }
 
     func follow(_ position: Double, in id: FoldPracticeID) {
-        guard error == nil, let entry = records[id], entry.finishedAt == nil,
+        guard error == nil, let entry = records[id],
               let reached = entry.steps.last(where: { $0.start <= position + 1 / 600.0 }),
               reached.id != entry.selectedID else { return }
-        do { try select(reached, in: id) } catch { self.error = error.localizedDescription }
+        do { try select(reached, in: id, reopen: false) } catch { self.error = error.localizedDescription }
     }
 
     func retryLoading() {
@@ -230,30 +236,32 @@ final class FoldPracticeStore: ObservableObject {
         try ensureReadable()
         guard let movieID = clip.localMovieID else { throw PulsePlayerError.unsupportedMedia }
         let id = FoldPracticeID.movie(movieID)
-        if var existing = records[id] {
-            guard let chapter else { return }
-            if let marked = existing.steps.first(where: { abs($0.start - chapter.start) < Self.minimumSpan }) {
-                try select(marked, in: id)
-                return
-            }
-            let step = FoldPracticeStep(id: UUID(), start: chapter.start, addedAt: .now, lessonTitleKey: chapter.title)
-            existing.steps.append(step)
-            existing.steps.sort { $0.start < $1.start }
-            existing.selectedID = step.id
-            existing.finishedAt = nil
-            try commit(existing)
-            return
-        }
+        let original = records[id]
+        var entry = original ?? FoldPracticeEntry(id: id, clip: clip, steps: [], selectedID: UUID(), updatedAt: .now)
+        let needsGuide = entry.craneGuideRevision == nil
+        guard needsGuide || chapter != nil else { return }
 
-        let now = Date()
-        let steps = CraneChapter.guide.enumerated().map { index, chapter in
-            FoldPracticeStep(id: UUID(), start: chapter.start,
-                             addedAt: now.addingTimeInterval(Double(index - CraneChapter.guide.count) / 1_000),
-                             lessonTitleKey: chapter.title)
+        // Install the map once. Opening one deleted chapter later restores just that chapter.
+        let chapters = needsGuide ? CraneChapter.guide : [chapter].compactMap { $0 }
+        let oldestMark = entry.steps.map(\.addedAt).min() ?? Date()
+        for (index, item) in chapters.enumerated() {
+            if let match = entry.steps.firstIndex(where: { abs($0.start - item.start) < Self.minimumSpan }) {
+                entry.steps[match].lessonTitleKey = item.title
+            } else {
+                let timestamp = oldestMark.addingTimeInterval(Double(index - chapters.count) / 1_000)
+                entry.steps.append(FoldPracticeStep(id: UUID(), start: item.start, addedAt: timestamp, lessonTitleKey: item.title))
+            }
         }
-        guard let selected = steps.first(where: { $0.start == (chapter?.start ?? 0) }) else { return }
-        try commit(FoldPracticeEntry(id: id, clip: clip, steps: steps, selectedID: selected.id,
-                                     updatedAt: now, duration: CraneChapter.filmDuration))
+        entry.steps.sort { $0.start < $1.start }
+        entry.duration = CraneChapter.filmDuration
+        entry.craneGuideRevision = 1
+        if let chapter, let selected = entry.steps.first(where: { abs($0.start - chapter.start) < Self.minimumSpan }) {
+            entry.selectedID = selected.id
+            entry.finishedAt = nil
+        } else if original == nil, let first = entry.steps.first {
+            entry.selectedID = first.id
+        }
+        try commit(entry)
     }
 
     private func commit(_ record: FoldPracticeEntry) throws {

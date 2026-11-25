@@ -172,7 +172,7 @@ private struct FoldClipExportView: View {
 
     init(entry: FoldPracticeEntry) {
         self.entry = entry
-        _selectedID = State(initialValue: entry.selectedID)
+        _selectedID = State(initialValue: entry.currentStep?.id ?? entry.steps.first?.id ?? entry.selectedID)
     }
 
     var body: some View {
@@ -183,6 +183,7 @@ private struct FoldClipExportView: View {
                     Text(verbatim: entry.clip.title).font(.capture(.headline))
                     ForEach(Array(entry.steps.enumerated()), id: \.element.id) { offset, step in
                         Button {
+                            guard selectedID != step.id else { return }
                             selectedID = step.id
                             error = nil
                             saved = nil
@@ -221,7 +222,7 @@ private struct FoldClipExportView: View {
         }
         .foregroundStyle(PulsePlayerStyle.paper).pulsePlayerScreenBackground()
         .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
-        .fullScreenCover(isPresented: $showingPlus) { MembershipView(exportRequired: true) }
+        .fullScreenCover(isPresented: $showingPlus) { MembershipView(entry: .foldVideo) }
         .interactiveDismissDisabled(working != nil)
         .onDisappear { working?.cancel() }
     }
@@ -234,15 +235,13 @@ private struct FoldClipExportView: View {
     private func save(_ step: FoldPracticeStep, at index: Int) {
         guard working == nil else { return }
         error = nil
-        guard commerce.canExportMedia else { showingPlus = true; return }
-        let owner = commerce.api.session?.userId.value
+        guard let authorization = try? commerce.requireMediaExport() else { showingPlus = true; return }
         let title = entry.clip.title + " · " + name(for: step, at: index)
         working = Task { @MainActor in
             defer { working = nil; preparingSource = false }
             let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
             defer { try? FileManager.default.removeItem(at: output) }
             do {
-                try commerce.requireMediaExport()
                 let clip: LessonClip
                 switch entry.id {
                 case .movie:
@@ -251,21 +250,16 @@ private struct FoldClipExportView: View {
                     }
                     clip = local
                 case .lesson(_, let recordOwner, _):
-                    guard recordOwner == owner else { throw PulsePlayerError.unauthorized }
+                    guard recordOwner == authorization.owner else { throw PulsePlayerError.unauthorized }
                     clip = entry.clip
                 }
                 preparingSource = true
-                let source = try await offline.editableSource(for: clip)
+                let source = try await offline.editableSource(for: clip, authorization: authorization)
                 preparingSource = false
                 try Task.checkCancellation()
-                try commerce.requireMediaExport()
-                guard owner == commerce.api.session?.userId.value else { throw PulsePlayerError.unauthorized }
                 try await VideoEditor.writeFold(step, in: entry, source: source, destination: output)
                 try Task.checkCancellation()
-                saved = try await library.importMovie(output, exported: true, title: title) {
-                    try commerce.requireMediaExport()
-                    guard owner == commerce.api.session?.userId.value else { throw PulsePlayerError.unauthorized }
-                }
+                saved = try await library.saveExport(output, title: title, authorization: authorization, commerce: commerce)
             } catch {
                 if !Task.isCancelled { self.error = error.localizedDescription }
             }

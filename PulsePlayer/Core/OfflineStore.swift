@@ -184,9 +184,8 @@ final class OfflineStore: NSObject, ObservableObject {
         }
     }
     /// Player and notebook exports need an editable file, including when a playable HLS package is cached.
-    func editableSource(for clip: LessonClip) async throws -> URL {
-        try commerce.requireMediaExport()
-        guard let owner = api.session?.userId.value else { throw PulsePlayerError.unauthorized }
+    func editableSource(for clip: LessonClip, authorization: MediaExportAuthorization) async throws -> URL {
+        try commerce.requireMediaExport(authorization)
         if clip.localMovieID != nil {
             guard clip.playbackURL.isFileURL, FileManager.default.isReadableFile(atPath: clip.playbackURL.path) else {
                 throw PulsePlayerError.service("This video is no longer in the library.")
@@ -197,39 +196,45 @@ final class OfflineStore: NSObject, ObservableObject {
         do {
             await resumePending()
             try Task.checkCancellation()
-            guard owner == api.session?.userId.value else { throw PulsePlayerError.unauthorized }
+            try commerce.requireMediaExport(authorization)
             if let copy = cached(clip.id), !copy.isHLS { return copy.url }
             if downloadingID == clip.id || preparingID == clip.id {
-                try await waitForSource(of: clip.id, owner: owner)
+                try await waitForSource(of: clip.id, owner: authorization.owner)
+                try commerce.requireMediaExport(authorization)
                 if let copy = cached(clip.id), !copy.isHLS { return copy.url }
             }
             guard !busy else { throw PulsePlayerError.service("Another download is in progress.") }
-            await download(clip, forExport: true, requestID: requestID)
-            try await waitForSource(of: clip.id, owner: owner)
+            await download(clip, authorization: authorization, requestID: requestID)
+            try await waitForSource(of: clip.id, owner: authorization.owner)
+            try commerce.requireMediaExport(authorization)
             guard let copy = cached(clip.id), !copy.isHLS else {
                 throw PulsePlayerError.service(error ?? Self.missingExportSource)
             }
             return copy.url
         } catch {
-            if Task.isCancelled, index.transfer?.id == requestID { await cancel() }
+            if index.transfer?.id == requestID, Task.isCancelled || authorization.owner != api.session?.userId.value {
+                await cancel()
+            }
             throw error
         }
     }
 
     private func waitForSource(of clipID: String, owner: String) async throws {
-        let changes = Publishers.CombineLatest4($downloadingID, $preparingID, $error, api.$offlineOwnerID)
+        let owners = api.$session.map { $0?.userId.value }.removeDuplicates()
+        let changes = Publishers.CombineLatest4($downloadingID, $preparingID, $error, owners)
         for await (downloading, preparing, message, currentOwner) in changes.values {
             try Task.checkCancellation()
-            guard currentOwner == owner, api.session?.userId.value == owner else { throw PulsePlayerError.unauthorized }
+            guard currentOwner == owner else { throw PulsePlayerError.unauthorized }
             if downloading != clipID, preparing != clipID { return }
             if let message, index.transfer?.completed == true { throw PulsePlayerError.service(message) }
         }
         throw CancellationError()
     }
 
-    func download(_ clip: LessonClip, forExport: Bool = false, requestID: UUID = UUID()) async {
-        if forExport {
-            do { try commerce.requireMediaExport() }
+    func download(_ clip: LessonClip, authorization: MediaExportAuthorization? = nil, requestID: UUID = UUID()) async {
+        let forExport = authorization != nil
+        if let authorization {
+            do { try commerce.requireMediaExport(authorization) }
             catch { self.error = error.localizedDescription; return }
         }
         guard preparingID == nil else { error = "Another download is being prepared."; return }
@@ -243,7 +248,8 @@ final class OfflineStore: NSObject, ObservableObject {
         guard let owner = api.session?.userId.value else { error = "Connect to your account before downloading."; return }
         guard forExport || !clip.playbackURL.isFileURL else { error = "This video is already stored on this device."; return }
         guard quota.mayDownload(clip.id, premium: commerce.premium) else {
-            error = "Your download allowance is used up."; return
+            error = quota.error ?? (commerce.premium ? "Connect to refresh your allowance." : "Your download allowance is used up.")
+            return
         }
         // Expired/missing local files may be re-downloaded. QuotaStore remembers paid IDs.
         let isHLS: Bool
@@ -256,9 +262,12 @@ final class OfflineStore: NSObject, ObservableObject {
         catch is CancellationError { return }
         catch { self.error = forExport ? error.localizedDescription : "Download could not start. Please check your connection."; return }
         guard owner == api.session?.userId.value else { error = "Connect to your account before downloading."; return }
-        guard quota.mayDownload(clip.id, premium: commerce.premium) else { error = "Your download allowance is used up."; return }
-        if forExport {
-            do { try commerce.requireMediaExport() }
+        guard quota.mayDownload(clip.id, premium: commerce.premium) else {
+            error = quota.error ?? (commerce.premium ? "Connect to refresh your allowance." : "Your download allowance is used up.")
+            return
+        }
+        if let authorization {
+            do { try commerce.requireMediaExport(authorization) }
             catch { self.error = error.localizedDescription; return }
         }
         // A player may hand us its local playback copy. Keep the remote identity
@@ -496,11 +505,15 @@ final class OfflineStore: NSObject, ObservableObject {
             return
         }
         do {
-            guard index.transfer?.id == transfer.id, transfer.owner == api.session?.userId.value else { return }
+            guard index.transfer?.id == transfer.id else { return }
+            guard transfer.owner == api.session?.userId.value else {
+                fail(transfer.id, message: "Download interrupted. Please try again.")
+                return
+            }
             try quota.recordDownload(video.id, owner: transfer.owner, premium: transfer.premium || commerce.premium)
             var next = index
             video.lastOpenedAt = next.videos.first { $0.id == video.id && $0.owner == video.owner }?.lastOpenedAt
-            next.videos.removeAll { $0.id == video.id }
+            next.videos.removeAll { $0.id == video.id && $0.owner == video.owner }
             next.videos.insert(video, at: 0)
             next.transfer = nil
             try persist(next)

@@ -28,13 +28,6 @@
 	<true/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Save the video you choose to export to your photo library.</string>
-	<key>SKAdNetworkItems</key>
-	<array>
-		<dict>
-			<key>SKAdNetworkIdentifier</key>
-			<string>cstr6suwn9.skadnetwork</string>
-		</dict>
-	</array>
 	<key>PulsePlayerAPIHost</key>
 	<string>$(PULSEPLAYER_API_HOST)</string>
 	<key>PulsePlayerAdsTestMode</key>
@@ -49,6 +42,13 @@
 	<string>$(PULSEPLAYER_TERMS_URL)</string>
 	<key>PulsePlayerWebsiteURL</key>
 	<string>$(PULSEPLAYER_WEBSITE_URL)</string>
+	<key>SKAdNetworkItems</key>
+	<array>
+		<dict>
+			<key>SKAdNetworkIdentifier</key>
+			<string>cstr6suwn9.skadnetwork</string>
+		</dict>
+	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

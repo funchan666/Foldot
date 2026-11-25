@@ -18,7 +18,28 @@ enum WatchAdmission {
     case reserved(WatchReservation)
 }
 
-struct DailyUsage: Codable {
+enum PracticeWatchAccess: String {
+    case replay = "Replay without using another view."
+    case plus = "This lesson is included with Plus."
+    case unlimited = "Unlimited viewing until the next reset."
+    case oneView = "Playing this lesson uses one view."
+    case pending = "This lesson is already opening."
+    case exhausted = "No views left for a new lesson today."
+    case checking = "Checking your viewing allowance…"
+    case unavailable = "Your viewing allowance is unavailable."
+
+    var newReservationCost: Int? {
+        switch self {
+        case .plus, .unlimited: 0
+        case .oneView: 1
+        default: nil
+        }
+    }
+
+    var canOpen: Bool { self == .replay || self == .pending || newReservationCost != nil }
+}
+
+struct DailyUsage: Codable, Equatable {
     var day: Date
     var watched: Set<String> = []
     // Legacy keys remain decodable. Favorites no longer consume any allowance.
@@ -42,6 +63,35 @@ struct DailyUsage: Codable {
     var nextDownloadBase: Int?
 
     var reservedWatchSpend: Int { pendingWatches?.values.reduce(0, +) ?? 0 }
+
+    func completedAds(_ kind: AllowanceKind) -> Int {
+        kind == .watch ? completedRewardIDs.count : completedDownloadRewardIDs?.count ?? 0
+    }
+
+    func totalAllowance(for kind: AllowanceKind) -> Int {
+        switch kind {
+        case .watch: (watchBaseForDay ?? 0) + extraWatches
+        case .download: (downloadBaseForDay ?? 0) + (extraDownloads ?? 0)
+        }
+    }
+
+    func remaining(_ kind: AllowanceKind) -> Int {
+        let spent = kind == .watch ? (watchSpend ?? watched.count) + reservedWatchSpend : downloadsUsed ?? 0
+        return max(0, totalAllowance(for: kind) - spent)
+    }
+
+    func access(to videoID: String, premium: Bool) -> PracticeWatchAccess {
+        if watched.contains(videoID) { return .replay }
+        if pendingWatches?[videoID] != nil { return .pending }
+        if premium { return .plus }
+        if completedAds(.watch) >= QuotaStore.unlimitedRewardCount { return .unlimited }
+        return remaining(.watch) > 0 ? .oneView : .exhausted
+    }
+
+    func allowsDownload(_ id: String, premium: Bool) -> Bool {
+        premium || completedAds(.download) >= QuotaStore.unlimitedRewardCount
+            || downloaded?.contains(id) == true || remaining(.download) > 0
+    }
 }
 
 @MainActor
@@ -52,26 +102,18 @@ final class QuotaStore: ObservableObject {
     private var policy: CommerceConfiguration?
     private var remote: QuotaConfiguration?
     private var storageOK = true
+    private var needsUsageSave = false
     private var watchAttempts: [String: Set<UUID>] = [:]
     var unlimited: Bool { isUnlimited(.watch) }
     var downloadsUnlimited: Bool { isUnlimited(.download) }
-    var watchesLeft: Int {
-        let spent = usage?.watchSpend ?? usage?.watched.count ?? 0
-        return max(0, totalAllowance(for: .watch) - spent - (usage?.reservedWatchSpend ?? 0))
-    }
-    var downloadsLeft: Int { max(0, totalAllowance(for: .download) - (usage?.downloadsUsed ?? 0)) }
+    var watchesLeft: Int { remaining(.watch) }
+    var downloadsLeft: Int { remaining(.download) }
     private var downloadReward: Int { max(0, remote?.downloadRewardCount ?? policy?.favoriteReward ?? 0) }
-    func isUnlimited(_ kind: AllowanceKind) -> Bool { completedAds(kind) >= 4 }
-    func completedAds(_ kind: AllowanceKind) -> Int {
-        kind == .watch ? (usage?.completedRewardIDs.count ?? 0) : (usage?.completedDownloadRewardIDs?.count ?? 0)
-    }
-    func remaining(_ kind: AllowanceKind) -> Int { kind == .watch ? watchesLeft : downloadsLeft }
-    func totalAllowance(for kind: AllowanceKind) -> Int {
-        switch kind {
-        case .watch: (usage?.watchBaseForDay ?? 0) + (usage?.extraWatches ?? 0)
-        case .download: (usage?.downloadBaseForDay ?? 0) + (usage?.extraDownloads ?? 0)
-        }
-    }
+    nonisolated static let unlimitedRewardCount = 4
+    func isUnlimited(_ kind: AllowanceKind) -> Bool { completedAds(kind) >= Self.unlimitedRewardCount }
+    func completedAds(_ kind: AllowanceKind) -> Int { usage(on: boundary())?.completedAds(kind) ?? 0 }
+    func remaining(_ kind: AllowanceKind) -> Int { usage(on: boundary())?.remaining(kind) ?? 0 }
+    func totalAllowance(for kind: AllowanceKind) -> Int { usage(on: boundary())?.totalAllowance(for: kind) ?? 0 }
     func rewardCount(for kind: AllowanceKind) -> Int {
         kind == .watch ? nextWatchReward : downloadReward
     }
@@ -85,6 +127,10 @@ final class QuotaStore: ObservableObject {
         self.policy = policy
         self.remote = remote
         guard self.userID != userID || usage == nil else {
+            if !storageOK {
+                storageOK = true
+                needsUsageSave = true
+            }
             resetIfNeeded()
             updateDailyBases()
             return
@@ -93,12 +139,14 @@ final class QuotaStore: ObservableObject {
         watchAttempts.removeAll()
         usage = nil
         storageOK = true
+        needsUsageSave = false
         error = nil
         guard userID != nil else { return }
         do {
             if let data = try SecureStorage.read(key) {
                 var saved = try JSONDecoder().decode(DailyUsage.self, from: data)
                 // A load cannot still be in progress after restoring an account from disk.
+                let abandonedWatches = saved.pendingWatches?.isEmpty == false
                 saved.pendingWatches = nil
                 if saved.schemaVersion != 2 {
                     // Preserve existing viewing spend/rewards during the one-time UTC migration.
@@ -111,7 +159,8 @@ final class QuotaStore: ObservableObject {
                     saved.completedDownloadRewardIDs = []
                     saved.extraDownloads = 0
                     try commit(saved)
-                } else { usage = saved }
+                } else if abandonedWatches { try commit(saved) }
+                else { usage = saved }
             } else { try commit(freshDay()) }
             resetIfNeeded()
             updateDailyBases()
@@ -132,20 +181,36 @@ final class QuotaStore: ObservableObject {
         do { try commit(next) }
         catch { storageOK = false; self.error = "Daily allowance could not be read. Please try again later." }
     }
-    func resetIfNeeded() {
+    func resetIfNeeded() { resetIfNeeded(at: boundary()) }
+
+    private func resetIfNeeded(at day: Date) {
         guard storageOK, userID != nil, let usage else { return }
-        if boundary() > usage.day {
+        if day > usage.day {
             do {
-                try commit(freshDay(downloaded: usage.downloaded ?? []))
+                try commit(freshDay(startingAt: day, downloaded: usage.downloaded ?? []))
                 watchAttempts.removeAll()
             }
             catch { storageOK = false; self.error = error.localizedDescription }
         }
     }
+
+    // Project tomorrow's ledger for a visible row that stays onscreen through 05:00 UTC.
+    // Only a business action or the foreground reset persists the new day.
+    private func usage(on day: Date) -> DailyUsage? {
+        guard let usage else { return nil }
+        if day > usage.day { return freshDay(startingAt: day, downloaded: usage.downloaded ?? []) }
+        return usage
+    }
+
+    func watchAccess(to id: String, premium: Bool, owner: String?, at now: Date = .now) -> PracticeWatchAccess {
+        guard let owner, owner == userID else { return .checking }
+        guard storageOK else { return .unavailable }
+        guard let day = usage(on: Self.boundary(at: now)) else { return .checking }
+        return day.access(to: id, premium: premium)
+    }
+
     func mayWatch(_ id: String, premium: Bool) -> Bool {
-        resetIfNeeded()
-        return premium || (storageOK && userID != nil && (unlimited || usage?.watched.contains(id) == true
-            || usage?.pendingWatches?[id] != nil || watchesLeft > 0))
+        watchAccess(to: id, premium: premium, owner: userID).canOpen
     }
     func recordWatch(_ id: String, premium: Bool, owner: String? = nil) -> Bool {
         guard let owner = owner ?? userID, let admission = reserveWatch(id, premium: premium, owner: owner) else { return false }
@@ -153,12 +218,15 @@ final class QuotaStore: ObservableObject {
         return true
     }
     func reserveWatch(_ id: String, premium: Bool, owner: String) -> WatchAdmission? {
-        guard owner == userID, mayWatch(id, premium: premium), var next = usage else { return nil }
-        if next.watched.contains(id) { return .alreadyWatched }
-        if next.pendingWatches?[id] == nil {
-            var pending = next.pendingWatches ?? [:]
-            pending[id] = premium || unlimited ? 0 : 1
-            next.pendingWatches = pending
+        guard owner == userID else { return nil }
+        let now = Date()
+        resetIfNeeded(at: Self.boundary(at: now))
+        let access = watchAccess(to: id, premium: premium, owner: owner, at: now)
+        guard access.canOpen, var next = usage else { return nil }
+        if access == .replay { return .alreadyWatched }
+        if let cost = access.newReservationCost {
+            if next.pendingWatches == nil { next.pendingWatches = [:] }
+            next.pendingWatches?[id] = cost
             do { try commit(next) }
             catch { self.error = error.localizedDescription; return nil }
         }
@@ -184,29 +252,36 @@ final class QuotaStore: ObservableObject {
         do { try commit(next) }
         catch {
             // Keep the known playback result. The next write saves it with the rest of the ledger.
+            needsUsageSave = true
             applyUsage(next)
             self.error = error.localizedDescription
         }
     }
     func mayDownload(_ id: String, premium: Bool) -> Bool {
-        resetIfNeeded()
-        return storageOK && userID != nil && (premium || downloadsUnlimited || usage?.downloaded?.contains(id) == true || downloadsLeft > 0)
+        guard storageOK, userID != nil, let day = usage(on: boundary()) else { return false }
+        return day.allowsDownload(id, premium: premium)
     }
     // Called only after a complete, durable offline file exists. The lifetime ID set
     // also makes recovery after an interrupted index write and re-download idempotent.
     func recordDownload(_ id: String, owner: String, premium: Bool) throws {
-        guard owner == userID, mayDownload(id, premium: premium), var next = usage else { throw PulsePlayerError.storage }
+        guard owner == userID else { throw PulsePlayerError.storage }
+        resetIfNeeded()
+        guard storageOK, var next = usage, next.allowsDownload(id, premium: premium) else { throw PulsePlayerError.storage }
         guard next.downloaded?.contains(id) != true else { return }
         next.downloaded = (next.downloaded ?? []).union([id])
-        if !premium && !downloadsUnlimited { next.downloadsUsed = (next.downloadsUsed ?? 0) + 1 }
+        if !premium && next.completedAds(.download) < Self.unlimitedRewardCount {
+            next.downloadsUsed = (next.downloadsUsed ?? 0) + 1
+        }
         try commit(next)
     }
     func canRequestReward(for kind: AllowanceKind, premium: Bool) -> Bool {
-        return !premium && storageOK && userID != nil && policy != nil && !isUnlimited(kind) && remaining(kind) == 0
+        guard !premium, storageOK, userID != nil, policy != nil, let day = usage(on: boundary()) else { return false }
+        return day.completedAds(kind) < Self.unlimitedRewardCount && day.remaining(kind) == 0
     }
     func reward(_ id: UUID, owner: String, kind: AllowanceKind) throws {
         guard owner == userID, storageOK else { throw PulsePlayerError.storage }
         resetIfNeeded()
+        guard storageOK else { throw PulsePlayerError.storage }
         guard var next = usage, policy != nil else { throw PulsePlayerError.configuration }
         if kind == .watch {
             guard !next.completedRewardIDs.contains(id) else { return }
@@ -222,6 +297,7 @@ final class QuotaStore: ObservableObject {
     func rewardNoFill(_ id: UUID, owner: String, kind: AllowanceKind) throws -> String? {
         guard owner == userID, storageOK else { throw PulsePlayerError.storage }
         resetIfNeeded()
+        guard storageOK else { throw PulsePlayerError.storage }
         guard var next = usage, policy != nil else { throw PulsePlayerError.configuration }
         guard !isUnlimited(kind), remaining(kind) == 0, next.luckyRewardIDs?.contains(id) != true else { return nil }
         let count = rewardCount(for: kind)
@@ -235,8 +311,8 @@ final class QuotaStore: ObservableObject {
         return kind == .watch ? "More views added. Your ad progress stays the same." : "More downloads added. Your ad progress stays the same."
     }
     private var key: String { "quota.\(userID ?? "none")" }
-    private func freshDay(downloaded: Set<String> = []) -> DailyUsage {
-        var value = DailyUsage(day: boundary())
+    private func freshDay(startingAt day: Date? = nil, downloaded: Set<String> = []) -> DailyUsage {
+        var value = DailyUsage(day: day ?? boundary())
         value.schemaVersion = 2
         value.watchSpend = 0
         value.downloaded = downloaded
@@ -260,7 +336,9 @@ final class QuotaStore: ObservableObject {
         return now >= five ? five : calendar.date(byAdding: .day, value: -1, to: five)!
     }
     private func commit(_ value: DailyUsage) throws {
+        guard needsUsageSave || value != usage else { return }
         try SecureStorage.write(JSONEncoder().encode(value), key: key)
+        needsUsageSave = false
         applyUsage(value)
         if storageOK, error != nil { error = nil }
     }

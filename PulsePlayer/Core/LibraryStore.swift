@@ -204,8 +204,7 @@ final class LibraryStore: ObservableObject {
     }
     // Internal IDs stay stable; only the user-facing shared copy gets a readable name.
     func shareFile(for movie: PracticeRecording, commerce: CommerceStore) async throws -> URL {
-        try commerce.requireMediaExport()
-        let exportOwner = commerce.api.session?.userId.value
+        let authorization = try commerce.requireMediaExport()
         let source = url(for: movie)
         let title = movie.title
         let task = Task.detached(priority: .userInitiated) {
@@ -241,8 +240,7 @@ final class LibraryStore: ObservableObject {
         } onCancel: { task.cancel() }
         do {
             try Task.checkCancellation()
-            try commerce.requireMediaExport()
-            guard exportOwner == commerce.api.session?.userId.value else { throw PulsePlayerError.unauthorized }
+            try commerce.requireMediaExport(authorization)
             return destination
         } catch {
             try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
@@ -290,8 +288,20 @@ final class LibraryStore: ObservableObject {
         next.history.removeAll { $0.id == visit.id }
         save(next)
     }
-    func importMovie(_ source: URL, exported: Bool = false, title: String? = nil,
-                     folderID: UUID? = nil, beforeCommit: (() throws -> Void)? = nil) async throws -> PracticeRecording {
+    func importMovie(_ source: URL, title: String? = nil, folderID: UUID? = nil) async throws -> PracticeRecording {
+        try await storeMovie(source, exported: false, title: title, folderID: folderID)
+    }
+
+    func saveExport(_ source: URL, title: String, authorization: MediaExportAuthorization,
+                    commerce: CommerceStore) async throws -> PracticeRecording {
+        try commerce.requireMediaExport(authorization)
+        return try await storeMovie(source, exported: true, title: title, folderID: nil) {
+            _ = try commerce.requireMediaExport(authorization)
+        }
+    }
+
+    private func storeMovie(_ source: URL, exported: Bool, title: String?, folderID: UUID?,
+                            beforeCommit: (() throws -> Void)? = nil) async throws -> PracticeRecording {
         guard readable else { throw PulsePlayerError.storage }
         let id = UUID()
         let ext = source.pathExtension.lowercased().nilIfBlank ?? "mov"
@@ -314,8 +324,8 @@ final class LibraryStore: ObservableObject {
                 _ = try await editableVideoDuration(for: AVURLAsset(url: destination))
             }
             try Task.checkCancellation()
-            // The destination may be removed from another scene during import.
             try beforeCommit?()
+            // The destination may be removed from another scene during import.
             if let folderID, folders.contains(where: { $0.id == folderID }) {
                 item.folderID = folderID
             }

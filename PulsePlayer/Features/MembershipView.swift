@@ -26,7 +26,19 @@ struct PlusEntryButton: View {
 }
 
 struct MembershipView: View {
-    var exportRequired = false
+    enum Entry {
+        case account, media, foldVideo, frameComparison
+
+        var explanation: String? {
+            switch self {
+            case .account: return nil
+            case .media: return "Export is included with Plus."
+            case .foldVideo: return "Save just this fold as a video with Plus."
+            case .frameComparison: return "Keep the frames of this fold as a collage or separate images with Plus."
+            }
+        }
+    }
+    var entry: Entry = .account
     @Environment(\.locale) private var locale
     @EnvironmentObject private var api: APIClient
     @EnvironmentObject private var commerce: CommerceStore
@@ -69,13 +81,18 @@ struct MembershipView: View {
                     VStack(alignment: .leading, spacing: 20) {
                         VStack(alignment: .leading, spacing: 8) {
                             SceneTitle("PulsePlayer Plus", size: 36)
-                            if exportRequired {
-                                LocalizedText("Export is included with Plus.")
+                            if let explanation = entry.explanation, !commerce.hasVerifiedPlus {
+                                LocalizedText(explanation)
                                     .font(.capture(.subheadline, weight: .semibold))
                                     .foregroundStyle(PulsePlayerStyle.accent)
                             }
                         }
-                        if commerce.premium { activeMembership }
+                        if commerce.premium {
+                            activeMembership
+                            if entry.explanation != nil, commerce.hasVerifiedPlus {
+                                ActionButton(title: "Return to export") { dismiss() }.disabled(purchasing)
+                            }
+                        }
                         benefits
                         Divider()
                         VStack(alignment: .leading, spacing: 12) {
@@ -128,7 +145,8 @@ struct MembershipView: View {
 
     private var benefits: some View {
         VStack(alignment: .leading, spacing: 8) {
-            benefit(.edit, "Export edited videos and audio")
+            benefit(.fold, "Save a single fold as a video")
+            benefit(.edit, "Share frame comparisons, edited videos and audio")
             benefit(.download, "No daily viewing or download limits")
             benefit(.play, "Skip opening ads")
         }

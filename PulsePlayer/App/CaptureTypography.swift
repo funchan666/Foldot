@@ -7,7 +7,7 @@ extension Font {
 }
 
 struct SceneTitle: View {
-    @ScaledMetric(relativeTo: .largeTitle) private var size: CGFloat
+    @ScaledMetric private var size: CGFloat
     let title: String
 
     init(_ title: String, size: CGFloat = 40) {

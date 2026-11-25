@@ -127,7 +127,7 @@ final class VideoEditor: ObservableObject {
         preview.load(sourceURL, autoplay: false)
     }
 
-    func applyPreview() async {
+    func applyPreview(audioOnly: Bool = false) async {
         guard let sourceURL, !isExporting, !isPreparingPreview else { return }
         let requestedRecipe = recipe
         let requestID = revision
@@ -147,6 +147,7 @@ final class VideoEditor: ObservableObject {
             // play AVVideoComposition directly even when the same composition exports.
             var previewRecipe = requestedRecipe
             previewRecipe.quality = .compact
+            if audioOnly { previewRecipe.muted = false }
             let (composition, video) = try await compose(url: sourceURL, recipe: previewRecipe)
             guard requestID == revision, previewRevision == previewID, recipe == requestedRecipe else { return }
             guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
@@ -154,18 +155,8 @@ final class VideoEditor: ObservableObject {
             }
             previewExporter = session
             session.videoComposition = video
-            session.outputURL = output
-            session.outputFileType = .mp4
-            await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in
-                    session.exportAsynchronously { continuation.resume() }
-                }
-            } onCancel: { session.cancelExport() }
-            try Task.checkCancellation()
+            try await Self.write(session, to: output, as: .mp4, failure: "Preview could not be prepared. Please try again.")
             guard requestID == revision, previewRevision == previewID, recipe == requestedRecipe else { return }
-            guard session.status == .completed else {
-                throw session.error ?? PulsePlayerError.service("Preview could not be prepared. Please try again.")
-            }
             let previousURL = previewURL
             preview.setMuted(false)
             preview.setSpeed(1)
@@ -192,16 +183,17 @@ final class VideoEditor: ObservableObject {
         var progressTask: Task<Void, Never>?
         defer { progressTask?.cancel() }
         do {
-            let (composition, video) = try await compose(url: sourceURL, recipe: recipe)
+            var exportRecipe = recipe
+            if audioOnly { exportRecipe.muted = false }
+            let (composition, video) = try await compose(url: sourceURL, recipe: exportRecipe)
             try Task.checkCancellation()
             if cancelRequested { throw CancellationError() }
             if audioOnly, composition.tracks(withMediaType: .audio).isEmpty {
-                throw PulsePlayerError.service("This clip has no audio. Turn off Mute if you want to extract its soundtrack.")
+                throw PulsePlayerError.service("This video has no audio track.")
             }
             guard let session = AVAssetExportSession(asset: composition, presetName: audioOnly ? AVAssetExportPresetAppleM4A : AVAssetExportPresetHighestQuality) else { throw PulsePlayerError.unsupportedMedia }
             exporter = session
-            session.outputURL = output
-            session.outputFileType = audioOnly ? .m4a : .mp4
+            Self.creditLesson(in: session, source: sourceURL)
             if !audioOnly { session.videoComposition = video }
             session.shouldOptimizeForNetworkUse = true
             progressTask = Task { [weak self] in
@@ -210,21 +202,12 @@ final class VideoEditor: ObservableObject {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                 }
             }
-            await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in
-                    session.exportAsynchronously { continuation.resume() }
-                }
-            } onCancel: { session.cancelExport() }
-            switch session.status {
-            case .completed:
-                guard FileManager.default.fileExists(atPath: output.path),
-                      (try output.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) > 0 else { throw PulsePlayerError.storage }
-                progress = 1
-                exportedURL = output
-                return output
-            case .cancelled: throw CancellationError()
-            default: throw session.error ?? PulsePlayerError.service("Export could not finish. Your original video is unchanged.")
-            }
+            try await Self.write(session, to: output, as: audioOnly ? .m4a : .mp4,
+                                 failure: "Export could not finish. Your original video is unchanged.")
+            if cancelRequested { throw CancellationError() }
+            progress = 1
+            exportedURL = output
+            return output
         } catch {
             try? FileManager.default.removeItem(at: output)
             self.error = error is CancellationError ? "Export cancelled. Your original video is unchanged." : error.localizedDescription
@@ -241,20 +224,29 @@ final class VideoEditor: ObservableObject {
               range.lowerBound >= 0 else {
             throw PulsePlayerError.service("This fold is outside the current video. Mark it again in the player.")
         }
-        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality),
-              session.supportedFileTypes.contains(.mp4) else { throw PulsePlayerError.unsupportedMedia }
+        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
+            throw PulsePlayerError.unsupportedMedia
+        }
         session.timeRange = CMTimeRange(start: CMTime(seconds: range.lowerBound, preferredTimescale: 600),
                                        end: CMTime(seconds: range.upperBound, preferredTimescale: 600))
-        session.outputURL = destination
-        session.outputFileType = .mp4
-        if let crane = Bundle.main.url(forResource: "PaperCrane", withExtension: "mp4"),
-           source.standardizedFileURL == crane.standardizedFileURL {
-            let credit = AVMutableMetadataItem()
-            credit.identifier = .commonIdentifierDescription
-            credit.value = "Excerpt from OrigamiCrane by Tavin (2010), trimmed and re-encoded. https://commons.wikimedia.org/wiki/File:OrigamiCrane.ogv • CC BY 3.0 https://creativecommons.org/licenses/by/3.0/" as NSString
-            session.metadata = [credit]
-        }
+        creditLesson(in: session, source: source)
+        try await write(session, to: destination, as: .mp4)
+    }
+
+    private static func creditLesson(in session: AVAssetExportSession, source: URL) {
+        guard let text = CraneChapter.filmCredit(for: source) else { return }
+        let credit = AVMutableMetadataItem()
+        credit.identifier = .commonIdentifierDescription
+        credit.value = text as NSString
+        session.metadata = [credit]
+    }
+
+    static func write(_ session: AVAssetExportSession, to destination: URL, as type: AVFileType,
+                      failure: String = "Video export failed. Please try again.") async throws {
+        guard session.supportedFileTypes.contains(type) else { throw PulsePlayerError.unsupportedMedia }
         try Task.checkCancellation()
+        session.outputURL = destination
+        session.outputFileType = type
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 session.exportAsynchronously { continuation.resume() }
@@ -262,9 +254,12 @@ final class VideoEditor: ObservableObject {
             }
         } onCancel: { session.cancelExport() }
         try Task.checkCancellation()
-        guard session.status == .completed,
-              (try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) > 0 else {
-            throw session.error ?? PulsePlayerError.service("Video export failed. Please try again.")
+        if session.status == .cancelled { throw CancellationError() }
+        guard session.status == .completed else {
+            throw session.error ?? PulsePlayerError.service(failure)
+        }
+        guard (try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) > 0 else {
+            throw PulsePlayerError.storage
         }
     }
     func cancelExport() { cancelRequested = true; exporter?.cancelExport() }
