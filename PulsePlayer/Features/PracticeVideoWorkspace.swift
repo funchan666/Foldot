@@ -16,15 +16,6 @@ enum VideoTool: String, Identifiable, CaseIterable {
         case .ranges: return "Mark a range"
         }
     }
-    var detail: String {
-        switch self {
-        case .audio: return "Save a video’s audio as an M4A file."
-        case .speed: return "Slow down or speed up a clip."
-        case .frame: return "Crop, rotate or mirror a video."
-        case .studio: return "Trim a clip and adjust its framing, speed or audio."
-        case .ranges: return "Loop a section or compare its frames."
-        }
-    }
     var editorTab: String {
         switch self {
         case .audio: return "Audio"
@@ -48,309 +39,121 @@ struct ToolsView: View {
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
-    @Environment(\.dynamicTypeSize) private var typeSize
+    @ObservedObject private var notebook = FoldPracticeStore.shared
     let openPlus: () -> Void
-    @State private var selection: WorkspaceSelection?
-    @State private var showingNotebook = false
+    @State private var chosenID: UUID?
+    @State private var sheet: ToolSheet?
+    @State private var playback: PlayerRoute?
+    @State private var importing = false
 
-    private enum WorkspaceSelection: Identifiable {
+    private enum ToolSheet: Identifiable {
+        case sources
         case editor(VideoTool, PracticeRecording?)
-        case comparison(RangeFrameRequest)
+        case frames(RangeFrameRequest)
 
         var id: String {
             switch self {
-            case .editor(let tool, let movie): "\(tool.id)-\(movie?.id.uuidString ?? "choose")"
-            case .comparison(let request): "comparison-\(request.id)"
+            case .sources: return "sources"
+            case .editor(let tool, let movie): return tool.id + (movie?.id.uuidString ?? "")
+            case .frames(let request): return request.id.uuidString
             }
         }
     }
 
+    private var videos: [PracticeRecording] {
+        library.movies.filter { !$0.isAudio }.sorted { ($0.lastOpenedAt ?? $0.date) > ($1.lastOpenedAt ?? $1.date) }
+    }
+
     var body: some View {
-        let movie = library.movies.lazy.filter { !$0.isAudio }.max { first, second in
-            (first.lastOpenedAt ?? .distantPast, first.date) < (second.lastOpenedAt ?? .distantPast, second.date)
-        }
-        ScenePage() { container in
-            let width = min(640, PulsePlayerStyle.pageContentWidth(in: container))
-            let bounds = CGRect(origin: .zero, size: container.size)
-            let allowsColumns = typeSize <= .xLarge && !PulsePlayerStyle.intersectsReservedRegion(bounds, in: container)
-            let sideBySide = movie != nil && allowsColumns && width >= 620
-            let rangeWidth = sideBySide ? (width - 18) / 2 : width
-            let stackedPreview = !allowsColumns || rangeWidth < 300
-            let layout = sideBySide ? AnyLayout(HStackLayout(alignment: .top, spacing: 18))
-                                    : AnyLayout(VStackLayout(alignment: .leading, spacing: 16))
+        let movie = videos.first { $0.id == chosenID }
+            ?? videos.first { notebook.entry(for: .movie($0.id)) != nil } ?? videos.first
+        ScenePage { _ in
             VStack(alignment: .leading, spacing: 20) {
-                HStack(alignment: .top, spacing: 10) {
+                HStack {
                     IconButton(symbol: .back, label: "Back", glass: true) { dismiss() }
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 12) {
-                            SceneTitle("Tools", size: 26).fixedSize(horizontal: true, vertical: false)
-                            Spacer(minLength: 0)
-                            PlusEntryButton(action: openPlus)
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            SceneTitle("Tools", size: 26)
-                            PlusEntryButton(action: openPlus)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    Spacer()
+                    PlusEntryButton(action: openPlus)
                 }
-                layout {
-                    if let movie { currentVideo(movie) } else { chooseVideo }
-                    rangePanel(movie: movie, stacked: stackedPreview)
-                }
-                quickTools(movie: movie, stacked: !allowsColumns || width < 320)
-                Button { showingNotebook = true } label: {
-                    ActionLabel(title: "Practice notebook", symbol: .library, primary: false)
-                }
-                .buttonStyle(PressStyle())
-                .accessibilityIdentifier("tools.notebook")
-            }
-        }
-        .sheet(item: $selection) { selection in
-            switch selection {
-            case .editor(let tool, let movie):
-                EditorSheet(initialMovie: movie, initialTool: tool)
-            case .comparison(let request):
-                RangeFrameComparison(request: request)
-            }
-        }
-        .sheet(isPresented: $showingNotebook) {
-            FoldNotebookView()
-        }
-    }
-
-    private var chooseVideo: some View {
-        Button { selection = .editor(.studio, nil) } label: {
-            ActionLabel(title: "Choose a video", symbol: .folder)
-        }
-        .buttonStyle(PressStyle())
-        .accessibilityHint("Choose a video from Photos or Files to start editing.")
-        .accessibilityIdentifier("tools.studio")
-    }
-
-    private func currentVideo(_ movie: PracticeRecording) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button { selection = .editor(.studio, movie) } label: {
-                VStack(alignment: .leading, spacing: 12) {
-                    VideoFileThumbnail(url: library.url(for: movie), maximumSize: 1080, contentMode: .fit)
-                        .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                        .clipShape(.rect(cornerRadius: 14))
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(verbatim: movie.displayFilename).font(.capture(.headline))
-                                .foregroundStyle(PulsePlayerStyle.paper)
-                            LocalizedText(VideoTool.studio.title).font(.capture(.footnote, weight: .semibold))
-                                .foregroundStyle(PulsePlayerStyle.accent)
-                        }
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        Glyph(symbol: .back, size: 13, tint: PulsePlayerStyle.accent)
-                            .rotationEffect(.degrees(180))
-                    }
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(PressStyle())
-            .accessibilityLabel("Edit video")
-            .accessibilityValue(Text(verbatim: movie.displayFilename))
-            .accessibilityIdentifier("tools.studio")
-
-            Button { selection = .editor(.studio, nil) } label: {
-                commandLabel("Change video", symbol: .folder)
-            }
-            .buttonStyle(PressStyle())
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .pulsePlayerPanel(cornerRadius: 14)
-    }
-
-    @ViewBuilder private func rangePanel(movie: PracticeRecording?, stacked: Bool) -> some View {
-        if let movie, let mark = movie.rangeMarks?.first(where: { $0.timeRange != nil }) {
-            let request = RangeFrameRequest(source: library.url(for: movie), mark: mark)
-            savedRange(request, movie: movie, stacked: stacked)
-        } else {
-            Button { selection = .editor(.ranges, movie) } label: {
-                HStack(spacing: 12) {
-                    Glyph(symbol: .bookmark, size: 20, tint: PulsePlayerStyle.ink)
-                        .frame(width: 38, height: 46)
-                        .background(PulsePlayerStyle.accent, in: RoundedRectangle(cornerRadius: 10))
-                    VStack(alignment: .leading, spacing: 6) {
-                        LocalizedText(VideoTool.ranges.title).font(.capture(.title3, weight: .semibold))
-                            .foregroundStyle(PulsePlayerStyle.paper)
-                        LocalizedText(VideoTool.ranges.detail).font(.capture(.footnote))
+                SceneTitle("Fold workbench", size: 32)
+                if let movie {
+                    Text(verbatim: movie.displayFilename).font(.headline).accessibilityAddTraits(.isHeader)
+                    ActionButton(title: "Change video", primary: false) { sheet = .sources }
+                    if let entry = notebook.entry(for: .movie(movie.id)), let duration = entry.duration {
+                        LocalizedText("Compare the paper before and after a fold.")
                             .foregroundStyle(PulsePlayerStyle.secondary)
-                    }
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Glyph(symbol: .back, size: 13, tint: PulsePlayerStyle.accent).rotationEffect(.degrees(180))
-                }
-                .padding(12)
-                .frame(minHeight: 74)
-                .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 16), tint: PulsePlayerStyle.accent.opacity(0.10))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(PressStyle())
-            .accessibilityIdentifier("tools.ranges")
-        }
-    }
-
-    private func savedRange(_ request: RangeFrameRequest, movie: PracticeRecording, stacked: Bool) -> some View {
-        let start = durationLabel(request.mark.start, fractional: true)
-        let end = durationLabel(request.mark.end, fractional: true)
-        let review = Button { selection = .editor(.ranges, movie) } label: {
-            commandLabel("Review saved ranges", symbol: .bookmark, primary: true)
-        }.buttonStyle(PressStyle()).accessibilityIdentifier("tools.ranges")
-        let compare = Button { selection = .comparison(request) } label: {
-            commandLabel("Compare 3 frames", symbol: .feed)
-        }.buttonStyle(PressStyle()).accessibilityIdentifier("tools.compareFrames")
-
-        return VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                LocalizedText("Saved ranges").font(.capture(.caption, weight: .semibold))
-                    .foregroundStyle(PulsePlayerStyle.accent)
-                Text(verbatim: request.title(in: AppLanguage.from(locale)))
-                    .font(.capture(.title3, weight: .semibold))
-                Text(verbatim: "\(start) – \(end)").font(.capture(.footnote)).monospacedDigit()
-                    .foregroundStyle(PulsePlayerStyle.secondary)
-                    .environment(\.layoutDirection, .leftToRight)
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
-
-            RangePreview(request: request, stacked: stacked)
-                .id(request.id)
-
-            PulsePlayerGlassGroup {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
-                        review.fixedSize(horizontal: true, vertical: false)
-                        compare.fixedSize(horizontal: true, vertical: false)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        review
-                        compare
-                    }
-                }
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .pulsePlayerPanel(cornerRadius: 16)
-    }
-
-    private func commandLabel(_ title: String, symbol: PulsePlayerGlyph, primary: Bool = false) -> some View {
-        HStack(spacing: 7) {
-            Glyph(symbol: symbol, size: 15, tint: PulsePlayerStyle.accent)
-            LocalizedText(title).font(.capture(.footnote, weight: .semibold))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .frame(minWidth: 44, minHeight: 44)
-        .foregroundStyle(PulsePlayerStyle.accent)
-        .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 10),
-                    tint: primary ? PulsePlayerStyle.accent.opacity(0.16) : nil,
-                    fallback: primary ? PulsePlayerStyle.mist : PulsePlayerStyle.surface)
-        .contentShape(Rectangle())
-    }
-
-    private func quickTools(movie: PracticeRecording?, stacked: Bool) -> some View {
-        let tools: [VideoTool] = [.frame, .speed, .audio]
-        let layout = stacked ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(alignment: .top, spacing: 0))
-        let rule = Rectangle().fill(PulsePlayerStyle.line)
-            .frame(width: stacked ? nil : 1, height: stacked ? 1 : nil)
-            .padding(stacked ? .horizontal : .vertical, 8)
-            .allowsHitTesting(false).accessibilityHidden(true)
-        return layout {
-            ForEach(tools) { tool in
-                quickToolButton(tool, movie: movie, stacked: stacked)
-                if tool != .audio { rule }
-            }
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .pulsePlayerGlass(in: RoundedRectangle(cornerRadius: 14), interactive: false)
-    }
-
-    private func quickToolButton(_ tool: VideoTool, movie: PracticeRecording?, stacked: Bool) -> some View {
-        let label = stacked ? AnyLayout(HStackLayout(spacing: 12))
-                            : AnyLayout(VStackLayout(alignment: .leading, spacing: 9))
-        return Button { selection = .editor(tool, movie) } label: {
-            label {
-                Glyph(symbol: tool.glyph, size: 18, tint: PulsePlayerStyle.accent)
-                    .frame(width: 33, height: 33)
-                    .background(PulsePlayerStyle.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
-                LocalizedText(tool.title).font(.capture(stacked ? .subheadline : .footnote, weight: .semibold))
-                    .foregroundStyle(PulsePlayerStyle.paper)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                if stacked {
-                    Spacer(minLength: 4)
-                    Glyph(symbol: .back, size: 12, tint: PulsePlayerStyle.secondary).rotationEffect(.degrees(180))
-                }
-            }
-            .padding(.horizontal, 10).padding(.vertical, 12)
-            .frame(maxWidth: .infinity, minHeight: stacked ? 54 : 78, alignment: stacked ? .leading : .topLeading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressStyle())
-        .accessibilityHint(Text(LocalizedStringKey(tool.detail)))
-        .accessibilityIdentifier("tools.\(tool.rawValue)")
-    }
-}
-
-private struct RangePreview: View {
-    let request: RangeFrameRequest
-    let stacked: Bool
-    @State private var frames: [RangeStill] = []
-    @State private var error: String?
-
-    var body: some View {
-        Group {
-            if frames.isEmpty {
-                LocalizedText(error ?? "Reading video frames…")
-                    .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
-            } else {
-                let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
-                                     : AnyLayout(HStackLayout(alignment: .top, spacing: 6))
-                let cell = stacked ? AnyLayout(HStackLayout(spacing: 10))
-                                   : AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
-                layout {
-                    ForEach(frames) { frame in
-                        cell {
-                            Image(decorative: frame.image, scale: 1)
-                                .resizable().scaledToFit()
-                                .frame(maxWidth: stacked ? 80 : .infinity)
-                                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                                .background(PulsePlayerStyle.mediaBackdrop)
-                                .clipShape(.rect(cornerRadius: 6))
-                                .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 2) {
-                                LocalizedText(frame.position.title).font(.capture(.caption, weight: .semibold))
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Text(verbatim: durationLabel(frame.time, fractional: true))
-                                    .font(.capture(.caption)).monospacedDigit().foregroundStyle(PulsePlayerStyle.secondary)
-                                    .environment(\.layoutDirection, .leftToRight)
+                        ForEach(Array(entry.steps.enumerated()), id: \.element.id) { index, step in
+                            if let range = entry.loopRange(for: step, duration: duration) {
+                                let name = step.displayName(language: .from(locale))
+                                    ?? L10n.format("Fold %@", [String(index + 1)], language: .from(locale))
+                                Button {
+                                    let mark = VideoRangeMark(id: step.id, name: name, start: range.lowerBound, end: range.upperBound)
+                                    sheet = .frames(RangeFrameRequest(source: library.url(for: movie), mark: mark))
+                                } label: {
+                                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                        Text(verbatim: durationLabel(step.start)).monospacedDigit()
+                                            .foregroundStyle(PulsePlayerStyle.secondary)
+                                            .environment(\.layoutDirection, .leftToRight)
+                                        Text(verbatim: name).multilineTextAlignment(.leading)
+                                    }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                }.buttonStyle(PressStyle())
+                                Divider()
                             }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityElement(children: .combine)
+                    } else {
+                        LocalizedText("Mark a fold in the player to compare its frames here.")
+                        ActionButton(title: "Open in player") {
+                            if let route = PlayerRoute.localMovies([movie], selected: movie, library: library) {
+                                playback = route
+                            } else { library.error = "This video file is no longer available." }
+                        }
                     }
+                    SectionLabel(title: "Edit video")
+                    ForEach([VideoTool.studio, .ranges, .speed, .frame, .audio]) { tool in
+                        EditorCommand(title: tool.title, symbol: tool.glyph, expanded: true) {
+                            sheet = .editor(tool, movie)
+                        }
+                    }
+                } else {
+                    ActionButton(title: "Choose a video") { sheet = .sources }
                 }
             }
         }
-        .task {
-            error = nil
-            do {
-                let result = try await request.readFrames(maximumSize: 360)
-                guard !Task.isCancelled else { return }
-                frames = result
-            } catch {
-                if !Task.isCancelled { self.error = error.localizedDescription }
+        .fullScreenCover(item: $playback) { PlayerScreen(route: $0) }
+        .sheet(item: $sheet) { route in
+            switch route {
+            case .frames(let request): RangeFrameComparison(request: request)
+            case .editor(let tool, let movie): EditorSheet(initialMovie: movie, initialTool: tool)
+            case .sources: sources
             }
         }
+    }
+
+    private var sources: some View {
+        VStack(spacing: 0) {
+            SheetHeading(title: "Choose a video") { sheet = nil }.disabled(importing)
+            ScenePage { geometry in
+                VStack(alignment: .leading, spacing: 14) {
+                    VideoImportActions(onImported: choose, importing: $importing,
+                                       presentation: .sourcePair(stacked: PulsePlayerStyle.pageContentWidth(in: geometry) < 320))
+                    ForEach(videos) { movie in
+                        Button { choose(movie) } label: {
+                            Text(verbatim: movie.displayFilename)
+                                .multilineTextAlignment(.leading)
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }.buttonStyle(PressStyle()).disabled(importing)
+                        Divider()
+                    }
+                }
+            }
+        }.interactiveDismissDisabled(importing)
+            .pulsePlayerScreenBackground().foregroundStyle(PulsePlayerStyle.paper)
+    }
+
+    private func choose(_ movie: PracticeRecording) {
+        chosenID = movie.id
+        sheet = nil
     }
 }
 
@@ -1535,7 +1338,7 @@ private struct RangeFrameComparison: View {
                         .fixedSize(horizontal: false, vertical: true)
                     if let selected = frames.first(where: { $0.position == selectedPosition }) {
                         frameStrip(in: container)
-                        RangeShareActions(context: .comparison(request, frames), busy: $exporting)
+                        RangeShareActions(request: request, frames: frames, busy: $exporting)
                         preview(selected, in: container)
                     } else if let loadError {
                         ErrorNote(message: loadError)
@@ -1615,48 +1418,27 @@ private struct RangeFrameComparison: View {
 }
 
 @MainActor
-struct RangeShareActions: View {
-    enum Context {
-        case comparison(RangeFrameRequest, [RangeStill])
-        case practice(source: URL, marks: [VideoRangeMark], stacked: Bool, loop: (VideoRangeMark) -> Void)
-    }
-
+private struct RangeShareActions: View {
     private enum Format { case comparison, stills }
 
     @EnvironmentObject private var commerce: CommerceStore
     @Environment(\.locale) private var locale
-    let context: Context
+    let request: RangeFrameRequest
+    let frames: [RangeStill]
     @Binding var busy: Bool
     @State private var exportTask: Task<Void, Never>?
     @State private var exportError: String?
-    @State private var selectedRangeID: UUID?
     @State private var showingPlus = false
     @State private var sharedStills: SharedRangeStills?
-    @State private var practiceComparison: RangeFrameRequest?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            switch context {
-            case .comparison(let request, let frames):
-                comparisonActions(request, frames: frames).disabled(busy)
-                exportNote
-                if busy { AccountLoadingIndicator(title: "Preparing export…") }
-                if let exportError { ErrorNote(message: exportError) }
-            case .practice(let source, let marks, let stacked, let loop):
-                SectionLabel(title: "Saved ranges").accessibilityAddTraits(.isHeader)
-                exportNote
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(marks) { mark in
-                        practiceRow(RangeFrameRequest(source: source, mark: mark),
-                                    showPreview: marks.first?.id == mark.id, stacked: stacked) {
-                            loop(mark)
-                        }
-                    }
-                }
-            }
+            comparisonActions(request, frames: frames).disabled(busy)
+            exportNote
+            if busy { AccountLoadingIndicator(title: "Preparing export…") }
+            if let exportError { ErrorNote(message: exportError) }
         }
         .fullScreenCover(isPresented: $showingPlus) { MembershipView(exportRequired: true) }
-        .sheet(item: $practiceComparison) { request in RangeFrameComparison(request: request) }
         .sheet(item: $sharedStills) { ShareSheet(items: $0.files) }
         .onDisappear { exportTask?.cancel() }
     }
@@ -1690,60 +1472,11 @@ struct RangeShareActions: View {
         }
     }
 
-    private func practiceRow(_ request: RangeFrameRequest, showPreview: Bool, stacked: Bool,
-                             loop: @escaping () -> Void) -> some View {
-        let start = durationLabel(request.mark.start, fractional: true)
-        let end = durationLabel(request.mark.end, fractional: true)
-        let exportingThisRange = selectedRangeID == request.id
-        let replay = EditorCommand(title: "Loop range", symbol: .play, emphasized: true, action: loop)
-            .accessibilityIdentifier("practice.review.loop.\(request.id.uuidString)")
-        let compare = EditorCommand(title: "Compare 3 frames", symbol: .feed) { practiceComparison = request }
-            .accessibilityIdentifier("practice.review.compare.\(request.id.uuidString)")
-        return VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(verbatim: request.title(in: AppLanguage.from(locale)))
-                    .font(.capture(.headline)).fixedSize(horizontal: false, vertical: true)
-                Text(verbatim: "\(start) – \(end)")
-                    .font(.capture(.footnote)).monospacedDigit().foregroundStyle(PulsePlayerStyle.secondary)
-                    .environment(\.layoutDirection, .leftToRight)
-                    .fixedSize(horizontal: false, vertical: true)
-            }.accessibilityElement(children: .combine)
-
-            PulsePlayerGlassGroup {
-                VStack(alignment: .leading, spacing: 4) {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 4) {
-                            replay.fixedSize(horizontal: true, vertical: false)
-                            compare.fixedSize(horizontal: true, vertical: false)
-                        }
-                        VStack(alignment: .leading, spacing: 0) {
-                            replay
-                            compare
-                        }
-                    }
-                    EditorCommand(title: "Share three-frame collage", symbol: .download) {
-                        export(request, format: .comparison)
-                    }
-                    .accessibilityIdentifier("practice.review.shareComparison.\(request.id.uuidString)")
-                }
-            }.disabled(busy)
-
-            if exportingThisRange {
-                if busy { AccountLoadingIndicator(title: "Preparing export…") }
-                if let exportError { ErrorNote(message: exportError) }
-            }
-            if showPreview { RangePreview(request: request, stacked: stacked).id(request.id) }
-        }
-        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .pulsePlayerPanel(cornerRadius: 15)
-    }
-
-    private func export(_ request: RangeFrameRequest, frames: [RangeStill]? = nil, format: Format) {
+    private func export(_ request: RangeFrameRequest, frames: [RangeStill], format: Format) {
         guard !busy, exportTask == nil else { return }
         exportError = nil
         guard commerce.canExportMedia else { showingPlus = true; return }
         busy = true
-        selectedRangeID = request.id
         let owner = commerce.api.session?.userId.value
         let language = AppLanguage.from(locale)
         exportTask = Task {
@@ -1751,13 +1484,9 @@ struct RangeShareActions: View {
             var staged: SharedRangeStills?
             do {
                 try commerce.requireMediaExport()
-                let stills: [RangeStill]
-                if let frames { stills = frames }
-                else { stills = try await request.readFrames() }
                 try Task.checkCancellation()
-                try commerce.requireMediaExport()
                 guard owner == commerce.api.session?.userId.value else { throw PulsePlayerError.unauthorized }
-                let images = try imagesToShare(stills, request: request, language: language, format: format)
+                let images = try imagesToShare(frames, request: request, language: language, format: format)
                 let writer = Task.detached(priority: .userInitiated) { try Self.stageJPEGs(images) }
                 let result = try await withTaskCancellationHandler {
                     try await writer.value
