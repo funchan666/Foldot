@@ -117,7 +117,7 @@ struct LibraryView: View {
     }
 
     var body: some View {
-        ScenePage() { container in
+        ScenePage(scrollsBehindTabBar: true) { container in
             let width = min(640, PulsePlayerStyle.pageContentWidth(in: container))
             VStack(alignment: .leading, spacing: 18) {
                 libraryHeader

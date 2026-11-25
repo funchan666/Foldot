@@ -16,11 +16,7 @@
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                         <subviews>
                             <imageView userInteractionEnabled="NO" contentMode="scaleAspectFit" image="LaunchMark" translatesAutoresizingMaskIntoConstraints="NO" id="launch-mark">
-                                <rect key="frame" x="144.5" y="386.5" width="104" height="104"/>
-                                <constraints>
-                                    <constraint firstAttribute="width" constant="104" id="launch-mark-width"/>
-                                    <constraint firstAttribute="height" constant="104" id="launch-mark-height"/>
-                                </constraints>
+                                <rect key="frame" x="140.5" y="382.5" width="112" height="112"/>
                             </imageView>
                         </subviews>
                         <viewLayoutGuide key="safeArea" id="launch-safe-area"/>
@@ -36,7 +32,7 @@
         </scene>
     </scenes>
     <resources>
-        <image name="LaunchMark" width="108" height="108"/>
-        <namedColor name="StartupBackground"><color red="0.980392" green="0.976471" blue="0.960784" alpha="1" colorSpace="custom" customColorSpace="sRGB"/></namedColor>
+        <image name="LaunchMark" width="112" height="112"/>
+        <namedColor name="StartupBackground"><color red="0.937255" green="0.960784" blue="0.988235" alpha="1" colorSpace="custom" customColorSpace="sRGB"/></namedColor>
     </resources>
 </document>

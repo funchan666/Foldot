@@ -93,20 +93,27 @@ struct PulsePlayerStartupHost: View {
 }
 
 struct PulsePlayerStartupView: View {
+    @State private var showsActivity = false
+
     var body: some View {
-        Image("LaunchMark")
-            .resizable()
-            .scaledToFit()
-            .frame(width: 104, height: 104)
+        Image(decorative: "LaunchMark")
             .overlay(alignment: .bottom) {
-                ProgressView()
-                    .tint(PulsePlayerStyle.accent)
-                    .offset(y: 32)
+                if showsActivity {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(PulsePlayerStyle.accent)
+                        .offset(y: 28)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color("StartupBackground").ignoresSafeArea(.container))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(LocalizedStringKey("PulsePlayer is starting"))
+            .task {
+                // A fast launch keeps the storyboard's still frame until the home view is ready.
+                do { try await Task.sleep(for: .milliseconds(450)) } catch { return }
+                showsActivity = true
+            }
     }
 }
 

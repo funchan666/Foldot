@@ -396,7 +396,7 @@ struct AccountView: View {
     }
 
     var body: some View {
-        ScenePage(depth: 44, openingGap: 14) { _ in
+        ScenePage(depth: 44, openingGap: 14, scrollsBehindTabBar: true) { _ in
             VStack(alignment: .leading, spacing: 12) {
                 SceneTitle("Settings", size: 26)
                 membershipEntry

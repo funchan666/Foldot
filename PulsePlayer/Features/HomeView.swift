@@ -38,7 +38,7 @@ struct FoldingDeskView: View {
     private var collectionLinks: [String] { commerce.release?.lcList?["us"] ?? [] }
 
     var body: some View {
-        ScenePage { container in
+        ScenePage(scrollsBehindTabBar: true) { container in
             let narrow = PulsePlayerStyle.pageContentWidth(in: container) < 310 || typeSize > .xLarge
             VStack(alignment: .leading, spacing: 24) {
                 ViewThatFits(in: .horizontal) {

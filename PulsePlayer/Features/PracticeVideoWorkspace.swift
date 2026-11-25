@@ -1431,11 +1431,6 @@ private struct RangeComparisonImage: View {
     let frames: [RangeStill]
     let language: AppLanguage
     private let imageWidth: CGFloat = 256
-    // The exported comparison keeps its own palette independent of the editor chrome.
-    private let canvas = Color(red: 16.0 / 255, green: 28.0 / 255, blue: 41.0 / 255)
-    private let letterbox = Color(red: 15.0 / 255, green: 33.0 / 255, blue: 43.0 / 255)
-    private let foreground = Color(red: 239.0 / 255, green: 247.0 / 255, blue: 252.0 / 255)
-    private let captionAccent = Color(red: 143.0 / 255, green: 228.0 / 255, blue: 212.0 / 255)
 
     var body: some View {
         let height = frames.first.map { imageWidth * CGFloat($0.image.height) / CGFloat($0.image.width) } ?? 144
@@ -1448,10 +1443,10 @@ private struct RangeComparisonImage: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Image(decorative: frame.image, scale: 1).resizable().scaledToFit()
                             .frame(width: imageWidth, height: min(440, max(132, height)))
-                            .background(letterbox)
+                            .background(PulsePlayerStyle.mediaSurface)
                         HStack(alignment: .firstTextBaseline, spacing: 10) {
                             Text(verbatim: L10n.text(frame.position.title, language: language))
-                                .font(.system(size: 16, weight: .semibold)).foregroundStyle(captionAccent)
+                                .font(.system(size: 16, weight: .semibold)).foregroundStyle(PulsePlayerStyle.mediaAccent)
                             Spacer(minLength: 0)
                             Text(verbatim: durationLabel(frame.time, fractional: true))
                                 .font(.system(size: 16, weight: .medium, design: .monospaced))
@@ -1461,7 +1456,7 @@ private struct RangeComparisonImage: View {
                 }
             }.environment(\.layoutDirection, .leftToRight)
         }.padding(24).frame(width: imageWidth * 3 + 72)
-            .foregroundStyle(foreground).background(canvas)
+            .foregroundStyle(PulsePlayerStyle.onDark).background(PulsePlayerStyle.mediaBackdrop)
             .environment(\.layoutDirection, language.direction)
     }
 }

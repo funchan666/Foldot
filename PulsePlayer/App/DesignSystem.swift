@@ -4,20 +4,20 @@ import UIKit
 enum PulsePlayerStyle {
     static let background = Color("LaunchBackground")
     static let surface = Color.white
-    static let raised = Color(red: 0.944, green: 0.947, blue: 0.925)
-    static let accent = Color(red: 0.137, green: 0.365, blue: 0.314)
+    static let raised = Color(red: 0.910, green: 0.941, blue: 0.992)
+    static let accent = Color(red: 0.141, green: 0.345, blue: 0.749)
     static let ink = Color.white
-    static let secondary = Color(red: 0.32, green: 0.36, blue: 0.33)
-    static let paper = Color(red: 0.104, green: 0.151, blue: 0.132)
+    static let secondary = Color(red: 0.294, green: 0.361, blue: 0.459)
+    static let paper = Color(red: 0.082, green: 0.141, blue: 0.239)
     static let paperSecondary = secondary
-    static let mist = Color(red: 0.872, green: 0.925, blue: 0.893)
-    static let line = Color(red: 0.844, green: 0.858, blue: 0.824)
+    static let mist = Color(red: 0.863, green: 0.918, blue: 1)
+    static let line = Color(red: 0.800, green: 0.851, blue: 0.914)
     static let danger = Color(red: 0.62, green: 0.18, blue: 0.17)
-    static let onDark = Color(red: 0.985, green: 0.985, blue: 0.965)
-    static let mediaBackdrop = Color(red: 0.052, green: 0.077, blue: 0.065)
-    static let mediaSurface = Color(red: 0.105, green: 0.147, blue: 0.13)
-    static let mediaSecondary = Color(red: 0.796, green: 0.840, blue: 0.808)
-    static let mediaAccent = Color(red: 0.67, green: 0.89, blue: 0.76)
+    static let onDark = Color(red: 0.961, green: 0.973, blue: 0.996)
+    static let mediaBackdrop = Color(red: 0.039, green: 0.063, blue: 0.114)
+    static let mediaSurface = Color(red: 0.090, green: 0.137, blue: 0.220)
+    static let mediaSecondary = Color(red: 0.737, green: 0.800, blue: 0.886)
+    static let mediaAccent = Color(red: 0.663, green: 0.835, blue: 1)
     static let mediaError = Color(red: 1, green: 0.72, blue: 0.70)
     static let pageMargin: CGFloat = 20
 
@@ -61,45 +61,65 @@ enum ArtworkCatalog {
 struct ScenePage<Opening: View, PageContent: View>: View {
     let depth: CGFloat
     let openingGap: CGFloat
+    let scrollsBehindTabBar: Bool
     let opening: (CGFloat) -> Opening
     let content: (GeometryProxy) -> PageContent
 
-    init(depth: CGFloat, openingGap: CGFloat = 16,
+    init(depth: CGFloat, openingGap: CGFloat = 16, scrollsBehindTabBar: Bool = false,
          @ViewBuilder opening: @escaping (CGFloat) -> Opening,
          @ViewBuilder content: @escaping (GeometryProxy) -> PageContent) {
         self.depth = depth
         self.openingGap = openingGap
+        self.scrollsBehindTabBar = scrollsBehindTabBar
         self.opening = opening
         self.content = content
     }
 
     var body: some View {
         GeometryReader { container in
-            let height = max(44, depth)
-            ScrollView {
-                VStack(spacing: 0) {
-                    if depth > 0 {
-                        opening(height)
-                            .frame(maxWidth: .infinity, minHeight: height, alignment: .bottomLeading)
-                            .pageHorizontalMargins()
-                            .frame(maxWidth: 680)
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 10)
-                            .padding(.bottom, openingGap)
+            if scrollsBehindTabBar {
+                GeometryReader { viewport in
+                    // Return only the space gained below the safe area to the scroll margins.
+                    let overlap = max(0, viewport.size.height - container.size.height)
+                    let page = scrollingPage(in: container).contentMargins(.bottom, overlap)
+                    if #available(iOS 26.0, *) {
+                        page.scrollEdgeEffectHidden(for: .bottom)
+                    } else {
+                        page
                     }
-                    content(container).pulsePlayerPage()
                 }
-            }.clipped()
+                .ignoresSafeArea(.container, edges: .bottom)
+            } else {
+                scrollingPage(in: container).clipped()
+            }
         }
         .pulsePlayerScreenBackground()
         .foregroundStyle(PulsePlayerStyle.paper)
     }
+
+    private func scrollingPage(in container: GeometryProxy) -> some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                if depth > 0 {
+                    let height = max(44, depth)
+                    opening(height)
+                        .frame(maxWidth: .infinity, minHeight: height, alignment: .bottomLeading)
+                        .pageHorizontalMargins()
+                        .frame(maxWidth: 680)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 10)
+                        .padding(.bottom, openingGap)
+                }
+                content(container).pulsePlayerPage()
+            }
+        }
+    }
 }
 
 extension ScenePage where Opening == EmptyView {
-    init(depth: CGFloat = 0,
+    init(depth: CGFloat = 0, scrollsBehindTabBar: Bool = false,
          @ViewBuilder content: @escaping (GeometryProxy) -> PageContent) {
-        self.init(depth: depth, openingGap: 0,
+        self.init(depth: depth, openingGap: 0, scrollsBehindTabBar: scrollsBehindTabBar,
                   opening: { _ in EmptyView() }, content: content)
     }
 }
