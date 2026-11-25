@@ -16,6 +16,7 @@ struct FoldNotebookView: View {
     @State private var error: String?
     @State private var export: FoldTimesCSV?
     @State private var exporting = false
+    @State private var clipEntry: FoldPracticeEntry?
 
     var body: some View {
         let entries = practice.recent(owner: api.offlineOwnerID, library: library, offline: offline)
@@ -43,6 +44,7 @@ struct FoldNotebookView: View {
         .foregroundStyle(PulsePlayerStyle.paper)
         .pulsePlayerScreenBackground()
         .fullScreenCover(item: $player) { PlayerScreen(route: $0) }
+        .sheet(item: $clipEntry) { FoldClipExportView(entry: $0) }
         .fileExporter(isPresented: $exporting, document: export, contentType: .commaSeparatedText,
                       defaultFilename: "PulsePlayer-fold-times") { result in
             if case .failure(let problem) = result { error = problem.localizedDescription }
@@ -116,7 +118,7 @@ struct FoldNotebookView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(verbatim: durationLabel(step.start, fractional: true))
                         .monospacedDigit().foregroundStyle(PulsePlayerStyle.secondary)
-                    if let name = step.name, !name.isEmpty {
+                    if let name = step.displayName(), !name.isEmpty {
                         Text(verbatim: name)
                     } else {
                         LocalizedText("Fold %@", String(offset + 1))
@@ -140,10 +142,149 @@ struct FoldNotebookView: View {
                 .font(.subheadline.weight(.semibold)).frame(minHeight: 44)
         }
         Button {
+            clipEntry = entry
+        } label: {
+            LocalizedText("Export a fold").font(.subheadline).frame(minHeight: 44)
+        }.buttonStyle(PressStyle())
+        Button {
             export = FoldTimesCSV(entry)
             exporting = true
         } label: {
             LocalizedText("Export fold times").font(.subheadline).frame(minHeight: 44)
+        }
+    }
+}
+
+private struct FoldClipExportView: View {
+    let entry: FoldPracticeEntry
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
+    @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var commerce: CommerceStore
+    @EnvironmentObject private var offline: OfflineStore
+    @State private var selectedID: UUID
+    @State private var working: Task<Void, Never>?
+    @State private var preparingSource = false
+    @State private var saved: PracticeRecording?
+    @State private var sharing: SharedFile?
+    @State private var showingPlus = false
+    @State private var error: String?
+
+    init(entry: FoldPracticeEntry) {
+        self.entry = entry
+        _selectedID = State(initialValue: entry.selectedID)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SheetHeading(title: "Export a fold") { dismiss() }.disabled(working != nil)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(verbatim: entry.clip.title).font(.capture(.headline))
+                    ForEach(Array(entry.steps.enumerated()), id: \.element.id) { offset, step in
+                        Button {
+                            selectedID = step.id
+                            error = nil
+                            saved = nil
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(verbatim: name(for: step, at: offset))
+                                    .font(.capture(.subheadline, weight: .semibold))
+                                HStack {
+                                    if let duration = entry.duration ?? entry.clip.duration,
+                                       let range = entry.loopRange(for: step, duration: duration) {
+                                        Text(verbatim: durationLabel(range.lowerBound, fractional: true) + " – " + durationLabel(range.upperBound, fractional: true))
+                                            .monospacedDigit()
+                                    }
+                                    if selectedID == step.id { LocalizedText("Selected") }
+                                }.font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.secondary)
+                            }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                        }.buttonStyle(PressStyle()).disabled(working != nil)
+                            .accessibilityAddTraits(selectedID == step.id ? .isSelected : [])
+                        Divider()
+                    }
+                    if let saved {
+                        SavedVideoExport(movie: saved, sharing: working != nil) { share(saved) }
+                    } else if working != nil {
+                        AccountLoadingIndicator(title: preparingSource ? "Preparing export…" : "Exporting…")
+                        Button("Cancel export") { working?.cancel() }.buttonStyle(CompactActionStyle())
+                    } else if let index = entry.steps.firstIndex(where: { $0.id == selectedID }) {
+                        if case .lesson = entry.id, offline.cached(entry.clip.id)?.isHLS != false {
+                            LocalizedText("We download the video before exporting. Existing downloads are reused.")
+                                .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+                        }
+                        ActionButton(title: "Save fold as MP4") { save(entry.steps[index], at: index) }
+                    }
+                    if let error { ErrorNote(message: error) }
+                }.pulsePlayerPage()
+            }
+        }
+        .foregroundStyle(PulsePlayerStyle.paper).pulsePlayerScreenBackground()
+        .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
+        .fullScreenCover(isPresented: $showingPlus) { MembershipView(exportRequired: true) }
+        .interactiveDismissDisabled(working != nil)
+        .onDisappear { working?.cancel() }
+    }
+
+    private func name(for step: FoldPracticeStep, at index: Int) -> String {
+        let language = AppLanguage.from(locale)
+        return step.displayName(language: language) ?? L10n.format("Fold %@", [String(index + 1)], language: language)
+    }
+
+    private func save(_ step: FoldPracticeStep, at index: Int) {
+        guard working == nil else { return }
+        error = nil
+        guard commerce.canExportMedia else { showingPlus = true; return }
+        let owner = commerce.api.session?.userId.value
+        let title = entry.clip.title + " · " + name(for: step, at: index)
+        working = Task { @MainActor in
+            defer { working = nil; preparingSource = false }
+            let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
+            defer { try? FileManager.default.removeItem(at: output) }
+            do {
+                try commerce.requireMediaExport()
+                let clip: LessonClip
+                switch entry.id {
+                case .movie:
+                    guard let local = entry.route(library: library, offline: offline)?.clips.first else {
+                        throw PulsePlayerError.service("This video is no longer in the library.")
+                    }
+                    clip = local
+                case .lesson(_, let recordOwner, _):
+                    guard recordOwner == owner else { throw PulsePlayerError.unauthorized }
+                    clip = entry.clip
+                }
+                preparingSource = true
+                let source = try await offline.editableSource(for: clip)
+                preparingSource = false
+                try Task.checkCancellation()
+                try commerce.requireMediaExport()
+                guard owner == commerce.api.session?.userId.value else { throw PulsePlayerError.unauthorized }
+                try await VideoEditor.writeFold(step, in: entry, source: source, destination: output)
+                try Task.checkCancellation()
+                saved = try await library.importMovie(output, exported: true, title: title) {
+                    try commerce.requireMediaExport()
+                    guard owner == commerce.api.session?.userId.value else { throw PulsePlayerError.unauthorized }
+                }
+            } catch {
+                if !Task.isCancelled { self.error = error.localizedDescription }
+            }
+        }
+    }
+
+    private func share(_ movie: PracticeRecording) {
+        guard working == nil else { return }
+        error = nil
+        guard commerce.canExportMedia else { showingPlus = true; return }
+        working = Task {
+            defer { working = nil }
+            do {
+                let url = try await library.shareFile(for: movie, commerce: commerce)
+                try Task.checkCancellation()
+                sharing = SharedFile(url: url)
+            } catch {
+                if !Task.isCancelled { self.error = error.localizedDescription }
+            }
         }
     }
 }
@@ -159,7 +300,7 @@ private struct FoldTimesCSV: FileDocument {
         for (i, step) in entry.steps.enumerated() {
             let duration = entry.duration ?? entry.clip.duration
             let end = duration.flatMap { entry.loopRange(for: step, duration: $0)?.upperBound }
-            rows.append([entry.clip.title, String(i + 1), step.name ?? "", String(step.start),
+            rows.append([entry.clip.title, String(i + 1), step.displayName() ?? "", String(step.start),
                          end.map { String($0) } ?? "", String(entry.resumeSeconds),
                          date.string(from: entry.updatedAt), entry.finishedAt.map { date.string(from: $0) } ?? ""])
         }
