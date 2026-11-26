@@ -2,27 +2,64 @@ import SwiftUI
 import StoreKit
 
 struct PlusEntryButton: View {
-    var isActive = false
+    enum Style { case compact, search, library }
+    var style: Style = .compact
     let action: () -> Void
+    @EnvironmentObject private var commerce: CommerceStore
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    private var active: Bool { commerce.hasVerifiedPlus }
 
     var body: some View {
-        let shape = Capsule()
-        return Button(action: action) {
-            HStack(spacing: 6) {
-                Glyph(symbol: .pass, size: 15, tint: PulsePlayerStyle.accent)
-                LocalizedText(isActive ? "Plus active" : "Plus").font(.capture(.footnote, weight: .semibold))
-            }
+        Button(action: action) {
+            switch style {
+            case .library:
+                let layout = typeSize.isAccessibilitySize
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+                    : AnyLayout(HStackLayout(spacing: 12))
+                layout {
+                    HStack(spacing: 10) {
+                        Glyph(symbol: .pass, size: 22, tint: PulsePlayerStyle.mediaAccent)
+                        LocalizedText("PulsePlayer Plus").font(.capture(.headline, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 6) {
+                        LocalizedText(active ? "Plus active" : "View plans")
+                            .font(.capture(.subheadline, weight: .semibold))
+                        Glyph(symbol: .back, size: 10, tint: PulsePlayerStyle.onDark)
+                            .rotationEffect(.degrees(180))
+                    }
+                }
+                .multilineTextAlignment(.leading)
+                .foregroundStyle(PulsePlayerStyle.onDark)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .frame(maxWidth: .infinity, minHeight: 54)
+                .pulsePlayerGlass(in: .rect(cornerRadius: 17), tint: PulsePlayerStyle.mediaSurface,
+                                  fallback: PulsePlayerStyle.mediaSurface, onDark: true)
+                .contentShape(.interaction, .rect(cornerRadius: 17))
+            case .compact, .search:
+                let prominent = style == .search
+                let ink = prominent ? PulsePlayerStyle.onDark : PulsePlayerStyle.accent
+                HStack(spacing: 7) {
+                    Glyph(symbol: .pass, size: prominent ? 18 : 15, tint: ink)
+                    LocalizedText(active ? "Plus active" : (prominent ? "Get Plus" : "Plus"))
+                        .font(.capture(prominent ? .subheadline : .footnote, weight: .semibold))
+                }
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12).padding(.vertical, 5)
-                .frame(minHeight: 32)
-                .foregroundStyle(PulsePlayerStyle.accent)
-                .pulsePlayerGlass(in: shape, tint: PulsePlayerStyle.accent.opacity(0.12), fallback: PulsePlayerStyle.raised)
+                .padding(.horizontal, prominent ? 15 : 12).padding(.vertical, 5)
+                .frame(minHeight: prominent ? 44 : 32)
+                .foregroundStyle(ink)
+                .pulsePlayerGlass(in: Capsule(), tint: prominent ? PulsePlayerStyle.accent : PulsePlayerStyle.accent.opacity(0.12),
+                                  fallback: prominent ? PulsePlayerStyle.accent : PulsePlayerStyle.raised, onDark: prominent)
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
+            }
         }
         .buttonStyle(PressStyle())
-        .accessibilityLabel(LocalizedStringKey(isActive ? "Plus active" : "PulsePlayer Plus"))
-        .accessibilityIdentifier("membership.tabEntry")
+        .accessibilityLabel(Text("PulsePlayer Plus"))
+        .accessibilityValue(active ? Text("Plus active") : Text(verbatim: ""))
+        .accessibilityHint(Text(LocalizedStringKey(active ? "View membership" : "View plans")))
+        .accessibilityIdentifier(style == .search ? "search.membership" : "membership.tabEntry")
     }
 }
 
@@ -64,16 +101,7 @@ struct MembershipView: View {
                 VStack(spacing: 0) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 26) {
-                            HStack(alignment: .top, spacing: 12) {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    benefit(.download, "No daily viewing or download limits")
-                                    benefit(.play, "Skip opening ads")
-                                }
-                                IconButton(symbol: .close, label: "Close", glass: true) { dismiss() }
-                                    .accessibilityValue(Text("PulsePlayer Plus"))
-                                    .disabled(purchasing || ads.isPresenting)
-                            }
-                            .pulsePlayerKeepControlsTogether()
+                            membershipIntroduction(sideBySide: sideBySide)
 
                             VStack(alignment: .leading, spacing: 12) {
                                 if purchaseAction != nil || commerce.canRetryPurchaseConfirmation { purchaseFeedback }
@@ -140,15 +168,75 @@ struct MembershipView: View {
         }
     }
 
-    private func benefit(_ symbol: PulsePlayerGlyph, _ title: String) -> some View {
-        HStack(spacing: 10) {
-            Glyph(symbol: symbol, size: 15, tint: PulsePlayerStyle.accent)
-                .frame(width: 22)
-                .accessibilityHidden(true)
-            LocalizedText(title).font(.capture(.subheadline))
-                .fixedSize(horizontal: false, vertical: true)
+    private func membershipIntroduction(sideBySide: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 9) {
+                Glyph(symbol: .pass, size: 21, tint: PulsePlayerStyle.mediaAccent)
+                LocalizedText("PulsePlayer Plus")
+                    .font(.capture(.headline, weight: .semibold))
+                    .foregroundStyle(PulsePlayerStyle.onDark)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+                Button { dismiss() } label: {
+                    Glyph(symbol: .close, size: 15, tint: PulsePlayerStyle.onDark)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityLabel(Text("Close"))
+                .accessibilityValue(Text("PulsePlayer Plus"))
+                .disabled(purchasing || ads.isPresenting)
+            }
+
+            Divider().overlay(PulsePlayerStyle.mediaSecondary.opacity(0.35))
+
+            if sideBySide {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 0) {
+                        viewingBenefit.fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 20)
+                        launchBenefit.fixedSize(horizontal: true, vertical: false)
+                    }
+                    stackedBenefits
+                }
+            } else {
+                stackedBenefits
+            }
         }
-        .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+        .padding(.horizontal, 18)
+        .padding(.top, 4)
+        .padding(.bottom, 20)
+        .pulsePlayerGlass(in: .rect(cornerRadius: 22), tint: PulsePlayerStyle.mediaSurface,
+                          fallback: PulsePlayerStyle.mediaSurface, interactive: false, onDark: true)
+        .pulsePlayerKeepControlsTogether()
+    }
+
+    private var stackedBenefits: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            viewingBenefit
+            launchBenefit
+        }
+    }
+
+    private var viewingBenefit: some View {
+        membershipBenefit(LocalizedText("Unlimited"), caption: "Daily views & downloads",
+                          spokenLabel: "No daily viewing or download limits")
+    }
+
+    private var launchBenefit: some View {
+        membershipBenefit(Text(0, format: .number), caption: "Ads at launch",
+                          spokenLabel: "Skip opening ads")
+    }
+
+    private func membershipBenefit(_ value: some View, caption: String, spokenLabel: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            value.font(.capture(.title, weight: .semibold)).foregroundStyle(PulsePlayerStyle.mediaAccent)
+            LocalizedText(caption).font(.capture(.subheadline)).foregroundStyle(PulsePlayerStyle.onDark)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: L10n.display(spokenLabel, language: AppLanguage.from(locale))))
     }
 
     private var activeMembership: some View {
@@ -192,6 +280,8 @@ struct MembershipView: View {
                 EmptyStateScene(appearance: .inline(.pass), message: "Subscription setup is incomplete. Please contact support.")
             } else {
                 if !plans.isEmpty {
+                    LocalizedText("Choose a plan")
+                        .font(.capture(.headline)).accessibilityAddTraits(.isHeader)
                     let columnCount = sideBySide ? min(plans.count, 2) : 1
                     let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: columnCount)
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
@@ -251,21 +341,35 @@ struct MembershipView: View {
         .accessibilityIdentifier("membership.plan.\(product.productIdentifier)")
     }
 
+    private func billingCopy(for product: SKProduct) -> (name: String, renewal: String)? {
+        guard let period = product.subscriptionPeriod else { return nil }
+        switch (period.unit, period.numberOfUnits) {
+        case (.week, 1), (.day, 7): return ("Weekly", "Renews automatically at %@ per week until canceled.")
+        case (.month, 1): return ("Monthly", "Renews automatically at %@ per month until canceled.")
+        case (.year, 1): return ("Yearly", "Renews automatically at %@ per year until canceled.")
+        default: return nil
+        }
+    }
+
     @ViewBuilder private func planName(_ product: SKProduct) -> some View {
-        if let period = product.subscriptionPeriod, period.numberOfUnits == 1, period.unit == .month {
-            LocalizedText("Monthly")
-        } else if let period = product.subscriptionPeriod, period.numberOfUnits == 1, period.unit == .year {
-            LocalizedText("Yearly")
+        if let copy = billingCopy(for: product) {
+            LocalizedText(copy.name)
         } else {
             Text(verbatim: commerce.period(product, locale: locale))
         }
     }
 
     private func renewalDisclosure(for plan: SKProduct) -> some View {
-        LocalizedText("%@ every %@. Renews automatically until canceled.",
-                      commerce.price(plan), commerce.period(plan, locale: locale))
-            .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+        let price = commerce.price(plan)
+        return Group {
+            if let copy = billingCopy(for: plan) {
+                LocalizedText(copy.renewal, price)
+            } else {
+                LocalizedText("%@ every %@. Renews automatically until canceled.", price, commerce.period(plan, locale: locale))
+            }
+        }
+        .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var checkoutButton: some View {
@@ -341,6 +445,8 @@ struct AccountView: View {
     @AppStorage(LocalPlaybackResume.enabledKey) private var resumesPlayback = true
     @AppStorage(LocalPlaybackPreferences.speedKey) private var defaultLocalSpeed = 1.0
     @AppStorage(LocalPlaybackPreferences.loopKey) private var loopsLocalPlayback = false
+    @AppStorage(LocalPlaybackPreferences.rewindKey) private var rewindSeconds = LocalPlaybackPreferences.defaultRewind
+    @AppStorage(LocalPlaybackPreferences.pauseBetweenFoldsKey) private var pauseBetweenFolds = false
     @Binding var path: [SettingsPage]
     @State private var pickingSpeed = false
     @State private var paywall = false
@@ -463,6 +569,20 @@ struct AccountView: View {
                 .accessibilityIdentifier("settings.defaultLocalSpeed")
             }
             VStack(spacing: 0) {
+                rewindSetting(stacked: stacked)
+                Divider()
+                Toggle(isOn: $pauseBetweenFolds) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        LocalizedText("Pause between folds")
+                        LocalizedText("In hands-free practice, tap play to start the next fold.")
+                            .font(.capture(.footnote)).foregroundStyle(PulsePlayerStyle.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 8)
+                }
+                .frame(minHeight: 48)
+                .accessibilityIdentifier("settings.pauseBetweenFolds")
+                Divider()
                 Toggle(isOn: $resumesPlayback) { LocalizedText("Resume playback") }
                     .frame(minHeight: 48)
                     .accessibilityHint("Continue local videos from the last position.")
@@ -475,6 +595,38 @@ struct AccountView: View {
             .padding(.horizontal, 14)
             .background(PulsePlayerStyle.surface, in: .rect(cornerRadius: 16))
             .font(.capture(.subheadline, weight: .medium)).tint(PulsePlayerStyle.accent)
+        }
+    }
+
+    private func rewindSetting(stacked: Bool) -> some View {
+        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+                             : AnyLayout(HStackLayout(spacing: 8))
+        return layout {
+            LocalizedText("Rewind by").frame(maxWidth: .infinity, alignment: .leading)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 2) { rewindChoices }.fixedSize(horizontal: true, vertical: false)
+                VStack(alignment: .leading, spacing: 2) { rewindChoices }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var rewindChoices: some View {
+        ForEach(LocalPlaybackPreferences.rewindChoices, id: \.self) { seconds in
+            let selected = LocalPlaybackPreferences.rewindSeconds(rewindSeconds) == seconds
+            Button { rewindSeconds = seconds } label: {
+                Text(Duration.seconds(seconds), format: .units(allowed: [.seconds], width: .abbreviated))
+                    .font(.capture(.subheadline, weight: selected ? .bold : .regular))
+                    .monospacedDigit()
+                    .foregroundStyle(selected ? PulsePlayerStyle.accent : PulsePlayerStyle.secondary)
+                    .padding(.horizontal, 8).frame(minWidth: 44, minHeight: 32)
+                    .background(selected ? PulsePlayerStyle.mist : Color.clear, in: Capsule())
+                    .frame(minHeight: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(PressStyle())
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .accessibilityLabel(Text(verbatim: L10n.format("Back %@ seconds", [seconds.formatted(.number.locale(locale))],
+                                                           language: .from(locale))))
         }
     }
 

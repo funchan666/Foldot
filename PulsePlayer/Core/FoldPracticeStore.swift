@@ -153,12 +153,23 @@ final class FoldPracticeStore: ObservableObject {
     }
 
     func undoLastMark(in id: FoldPracticeID) throws {
-        guard var entry = records[id], let last = entry.steps.max(by: { $0.addedAt < $1.addedAt }) else { return }
-        entry.steps.removeAll { $0.id == last.id }
-        if last.id == entry.selectedID, let replacement = entry.steps.last(where: { $0.start < last.start }) ?? entry.steps.first {
-            entry.selectedID = replacement.id
+        guard let last = records[id]?.steps.max(by: { $0.addedAt < $1.addedAt }) else { return }
+        try removeMark(last.id, in: id, reopen: true)
+    }
+
+    func removeMark(_ stepID: UUID, in id: FoldPracticeID, reopen: Bool = false) throws {
+        guard var entry = records[id], let index = entry.steps.firstIndex(where: { $0.id == stepID }) else { return }
+        entry.steps.remove(at: index)
+        if entry.selectedID == stepID, !entry.steps.isEmpty {
+            entry.selectedID = entry.steps[max(0, index - 1)].id
         }
-        entry.finishedAt = nil
+        if reopen { entry.finishedAt = nil }
+        try commit(entry)
+    }
+
+    func clearMarks(in id: FoldPracticeID) throws {
+        guard var entry = records[id] else { return }
+        entry.steps.removeAll()
         try commit(entry)
     }
 

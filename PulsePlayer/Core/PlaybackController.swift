@@ -10,6 +10,15 @@ enum LocalPlaybackIdentity: Codable, Hashable {
 enum LocalPlaybackPreferences {
     static let speedKey = "foldot.playback.localDefaultSpeed"
     static let loopKey = "foldot.playback.loopLocalVideos"
+    static let pauseBetweenFoldsKey = "pulseplayer.playback.pauseBetweenLocalFolds"
+    static let rewindKey = "pulseplayer.playback.localRewindSeconds"
+    static let rewindChoices = [3, 5, 10]
+    static let defaultRewind = 10
+
+    static func rewindSeconds(_ stored: Int) -> Int {
+        rewindChoices.contains(stored) ? stored : defaultRewind
+    }
+
     static let speeds: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
 
     static func speed(_ stored: Double) -> Float {
@@ -201,7 +210,7 @@ final class PlaybackController: ObservableObject {
                 guard endedAt.isValid == activeEnd.isValid,
                       !endedAt.isValid || CMTimeCompare(endedAt, activeEnd) == 0 else { return }
                 if self.repeatedRange != nil {
-                    if self.wantsPlayback { self.finishRangePass() }
+                    if self.wantsPlayback { self.finishRangePass(allowPracticeBreak: true) }
                     else { self.pausedAtRangeEnd = true }
                 } else if let identity = self.localIdentity {
                     if self.loopsWholeVideo, self.wantsPlayback {
@@ -256,7 +265,7 @@ final class PlaybackController: ObservableObject {
             return
         }
         if pausedAtRangeEnd {
-            finishRangePass()
+            finishRangePass(allowPracticeBreak: false)
             return
         }
         if reachedEnd {
@@ -378,7 +387,7 @@ final class PlaybackController: ObservableObject {
         movePlayhead(to: range.lowerBound)
     }
 
-    private func finishRangePass() {
+    private func finishRangePass(allowPracticeBreak: Bool) {
         pausedAtRangeEnd = false
         guard let range = repeatedRange else { return }
         guard var guide = foldGuide else {
@@ -403,6 +412,12 @@ final class PlaybackController: ObservableObject {
         }
         guard let nextRange = entry.loopRange(for: next, duration: timeline.duration) else {
             finishFoldGuide("Check the marks for this fold and try again.")
+            return
+        }
+        if allowPracticeBreak, localIdentity != nil, UserDefaults.standard.bool(forKey: LocalPlaybackPreferences.pauseBetweenFoldsKey) {
+            pausedAtRangeEnd = true
+            pause()
+            foldNotice = "Tap play when you’re ready for the next fold."
             return
         }
         do {

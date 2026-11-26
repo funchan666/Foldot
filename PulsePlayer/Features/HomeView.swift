@@ -54,7 +54,11 @@ struct LessonSearchPage: View {
                 let divided = PulsePlayerStyle.intersectsReservedRegion(CGRect(origin: .zero, size: page.size), in: page)
                 let sideBySide = width >= 600 && !divided && !typeSize.isAccessibilitySize
                 VStack(alignment: .leading, spacing: 20) {
-                    searchActions
+                    VStack(alignment: .leading, spacing: 12) {
+                        searchActions(stacked: stacked || divided)
+                        composer(stacked: stacked || divided)
+                            .pulsePlayerKeepControlsTogether()
+                    }
                     let recent = sessions
                     let entry = recent.first(where: { $0.finishedAt == nil }) ?? recent.first
                     if entry == nil && library.history.isEmpty && library.error == nil && !practice.needsLoadRetry {
@@ -69,13 +73,6 @@ struct LessonSearchPage: View {
                         }
                     }
                 }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                composer(stacked: stacked)
-                    .pulsePlayerKeepControlsTogether()
-                    .pageHorizontalMargins()
-                    .frame(maxWidth: 680).frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
             }
         }
         .pulsePlayerScreenBackground()
@@ -132,17 +129,27 @@ struct LessonSearchPage: View {
         }
     }
 
-    private var searchActions: some View {
-        HStack(spacing: 8) {
-            VideoImportActions(onImported: practiceMovie, importing: $importing, presentation: .menu(title: "Import"))
-            Spacer(minLength: 8)
-            GlassActionMenu(title: "Shortcuts", items: searchShortcuts) {
-                TintedArtwork(name: "PlayerMore", tint: PulsePlayerStyle.accent)
-                    .frame(width: 19, height: 19)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+    private func searchActions(stacked: Bool) -> some View {
+        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+                             : AnyLayout(HStackLayout(spacing: 12))
+        return layout {
+            PlusEntryButton(style: .search) {
+                linkFocused = false
+                editingHistory = false
+                openPlus()
             }
-            .accessibilityLabel(LocalizedStringKey("More"))
+            HStack(spacing: 8) {
+                if !stacked { Spacer(minLength: 0) }
+                VideoImportActions(onImported: practiceMovie, importing: $importing, presentation: .menu(title: "Import"))
+                if stacked { Spacer(minLength: 0) }
+                GlassActionMenu(title: "Shortcuts", items: searchShortcuts) {
+                    TintedArtwork(name: "PlayerMore", tint: PulsePlayerStyle.accent)
+                        .frame(width: 19, height: 19)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel(LocalizedStringKey("More"))
+            }
         }
         .pulsePlayerKeepControlsTogether()
     }
@@ -152,13 +159,12 @@ struct LessonSearchPage: View {
         if !collectionLinks.isEmpty {
             items.append(ActionMenuItem("Video collections", .library) { linkFocused = false; path.append(.collections) })
         }
-        items.append(ActionMenuItem("PulsePlayer Plus", .pass) { linkFocused = false; openPlus() })
         return items
     }
 
     private func emptySearch(compact: Bool, availableHeight: CGFloat) -> some View {
         VStack(spacing: compact ? 8 : 14) {
-            Image(decorative: "LaunchMark").resizable().scaledToFit()
+            Image(decorative: "PulsePlayerLaunchMark").resizable().scaledToFit()
                 .frame(width: compact ? 32 : 66, height: compact ? 32 : 66)
             LocalizedText("No recent links")
                 .font(.capture(.title3, weight: .semibold))
@@ -864,16 +870,16 @@ struct LoginLandingView: View {
             case .folder(let route): ChannelBrowser(route: route)
             case .player(let route): PlayerScreen(route: route)
             case nil:
-                ScenePage { _ in
-                    if let error {
+                if let error {
+                    ScenePage { _ in
                         MessagePanel(title: "Couldn’t open this link", message: error, actionTitle: "Try again") {
                             attempt += 1
                         }
-                    } else {
-                        AccountLoadingIndicator(title: "Finding video…")
                     }
+                    .sceneBack(context: "Open video") { dismiss() }
+                } else {
+                    VideoLookupView(status: "Finding video…") { dismiss() }
                 }
-                .sceneBack(context: "Open video") { dismiss() }
             }
         }
         .task(id: attempt) { await resolve() }

@@ -85,7 +85,11 @@ struct PulsePlayerStartupHost: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background { ads.didEnterBackground() }
+            if phase == .background {
+                // A new process starts at the branded startup view, even after a full-screen ad.
+                UIApplication.shared.ignoreSnapshotOnNextApplicationLaunch()
+                ads.didEnterBackground()
+            }
             if phase == .active {
                 ads.didBecomeActive(commerce: commerce, accountAccess: accountAccess)
             }
@@ -100,7 +104,7 @@ struct PulsePlayerStartupView: View {
     @State private var showsActivity = false
 
     var body: some View {
-        let mark = Image(decorative: "LaunchMark")
+        let mark = Image(decorative: "PulsePlayerLaunchMark")
         mark
             .overlay {
                 if !reduceMotion {

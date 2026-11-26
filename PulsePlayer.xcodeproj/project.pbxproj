@@ -28,7 +28,7 @@
 		8B7AC1860EA6FD5B4C472DA6 /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; productRef = 1E2EBF992EE4434C89FA31D5 /* GoogleMobileAds */; };
 		8C78E63A9D2775413DFCA438 /* PulsePlayer/Features/HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 198C628051C30B581DC8DE92 /* PulsePlayer/Features/HomeView.swift */; };
 		8CBAB9F374786F17F0527D7A /* PulsePlayer/Features/MembershipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC62DF084BD6179B0CD0BFAA /* PulsePlayer/Features/MembershipView.swift */; };
-		A09B10000000000000000001 /* PulsePlayer/Resources/LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = A09B10000000000000000002 /* PulsePlayer/Resources/LaunchScreen.storyboard */; };
+		A09B10000000000000000001 /* PulsePlayer/Resources/PulsePlayerLaunch.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = A09B10000000000000000002 /* PulsePlayer/Resources/PulsePlayerLaunch.storyboard */; };
 		A44A83298DFF881F87AA0F94 /* PulsePlayer/Core/VideoEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A756C8C59952EE6C3FB7A7E /* PulsePlayer/Core/VideoEditor.swift */; };
 		ACCE55100000000000000001 /* PulsePlayer/Features/AccountAccessViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACCE55100000000000000002 /* PulsePlayer/Features/AccountAccessViews.swift */; };
 		C68F5643B660D6177C54038C /* PulsePlayer/Core/LibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1983D2A3DA5E7E885A18C42A /* PulsePlayer/Core/LibraryStore.swift */; };
@@ -72,7 +72,7 @@
 		675FC4243CA06F6ED86F21AC /* PulsePlayer/Core/RewardedAds.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulsePlayer/Core/RewardedAds.swift; sourceTree = SOURCE_ROOT; };
 		7641F37159249EE8BA2436D1 /* PulsePlayer/Features/LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulsePlayer/Features/LibraryView.swift; sourceTree = SOURCE_ROOT; };
 		86E8C246447DD4C5D9405F57 /* PulsePlayer/Resources/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PulsePlayer/Resources/Info.plist; sourceTree = SOURCE_ROOT; };
-		A09B10000000000000000002 /* PulsePlayer/Resources/LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = PulsePlayer/Resources/LaunchScreen.storyboard; sourceTree = SOURCE_ROOT; };
+		A09B10000000000000000002 /* PulsePlayer/Resources/PulsePlayerLaunch.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = PulsePlayer/Resources/PulsePlayerLaunch.storyboard; sourceTree = SOURCE_ROOT; };
 		A8792157CB4F27FB949C035F /* PulsePlayer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = PulsePlayer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ACCE55100000000000000002 /* PulsePlayer/Features/AccountAccessViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulsePlayer/Features/AccountAccessViews.swift; sourceTree = SOURCE_ROOT; };
 		AF66AA80124DBF96C75B9640 /* PulsePlayer/Features/FoldPracticeControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulsePlayer/Features/FoldPracticeControls.swift; sourceTree = SOURCE_ROOT; };
@@ -140,7 +140,7 @@
 				1E86FD4AD3FF9F970DB0B719 /* PulsePlayer/Resources/Commerce.json */,
 				B01A9BEACE5275588553E5AD /* PulsePlayer/Resources/PrivacyInfo.xcprivacy */,
 				86E8C246447DD4C5D9405F57 /* PulsePlayer/Resources/Info.plist */,
-				A09B10000000000000000002 /* PulsePlayer/Resources/LaunchScreen.storyboard */,
+				A09B10000000000000000002 /* PulsePlayer/Resources/PulsePlayerLaunch.storyboard */,
 				29492C6D58CC63AE5CCF1383 /* Config/PulsePlayer.xcconfig */,
 				0A3E27B8CA818264D75C8D81 /* Products */,
 			);
@@ -222,7 +222,7 @@
 				0A80A0B8549C3D5AB3BBC1FC /* PulsePlayer/Resources/Assets.xcassets in Resources */,
 				445B4DAFB0E123A139308F4D /* PulsePlayer/Resources/Commerce.json in Resources */,
 				16EB816FD26D57C86FA63242 /* PulsePlayer/Resources/PrivacyInfo.xcprivacy in Resources */,
-				A09B10000000000000000001 /* PulsePlayer/Resources/LaunchScreen.storyboard in Resources */,
+				A09B10000000000000000001 /* PulsePlayer/Resources/PulsePlayerLaunch.storyboard in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

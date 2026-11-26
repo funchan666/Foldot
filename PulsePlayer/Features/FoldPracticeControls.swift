@@ -263,6 +263,13 @@ struct FoldPracticePanel: View {
                     close(false)
                 }
             },
+            ActionMenuItem("Unmark", .close, destructive: true) {
+                perform {
+                    try notebook.removeMark(current.id, in: identity)
+                    playback.stopRepeating()
+                    editingName = false
+                }
+            },
             ActionMenuItem("Undo last mark", .back, destructive: true) {
                 perform {
                     try notebook.undoLastMark(in: identity)

@@ -141,20 +141,25 @@ struct DiscoverView: View {
     }
     var body: some View {
         let showsPlayback = api.session != nil && !feed.entries.isEmpty
+        let resolving = api.session != nil && feed.entries.isEmpty &&
+            (feed.loading || loadedUserID != api.session?.userId.value)
         let exit: (() -> Void)? = canDismiss || onExit != nil ? exitPlayer : nil
         return Group {
             if showsPlayback {
                 playerPages(exit: exit)
+            } else if resolving {
+                VideoLookupView(status: search.nilIfBlank == nil ? "Loading videos…" : "Finding video…", cancel: exit)
+                    .safeAreaInset(edge: .top, spacing: 0) { DownloadCompletionNotice(onMedia: true) }
             } else {
                 VStack(spacing: 0) {
                     PlayerHeader(exit: exit)
                     lessonStatusPage
                 }
             }
-        }.pulsePlayerScreenBackground(showsPlayback ? PulsePlayerStyle.mediaBackdrop : PulsePlayerStyle.background)
+        }.pulsePlayerScreenBackground(showsPlayback || resolving ? PulsePlayerStyle.mediaBackdrop : PulsePlayerStyle.background)
             .foregroundStyle(PulsePlayerStyle.paper)
-            .preferredColorScheme(showsPlayback ? .dark : .light)
-            .statusBarHidden(showsPlayback)
+            .preferredColorScheme(showsPlayback || resolving ? .dark : .light)
+            .statusBarHidden(showsPlayback || resolving)
             .modifier(PlayerPagingAccess(entries: displayEntries, selectedID: $activeID, tailID: morePageID, players: players))
             .onChange(of: library.listRequest) { _, request in
                 if request != nil { players.releaseAll(); if canDismiss { dismiss() } }
@@ -185,7 +190,8 @@ struct DiscoverView: View {
     }
 
     private func playerPages(exit: (() -> Void)?) -> some View {
-        PlaybackPager(activeID: $activeID, exit: exit) { size, insets in
+        let waitingForPlayer = activeID.flatMap { players.controllers[$0] } == nil
+        return PlaybackPager(activeID: $activeID, fallbackExit: waitingForPlayer ? exit : nil) { size, insets in
             ForEach(displayEntries) { entry in
                 let clip = entry.clip
                 Group {
@@ -195,7 +201,7 @@ struct DiscoverView: View {
                                  playback: playback, replaceMedia: feed.replaceMedia,
                                  didStartPlaying: { players.prepareNext(after: entry.id) },
                                  didStopPlaying: { if activeID == entry.id { players.suspend() } },
-                                 onSwipeExit: exitPlayer)
+                                 exit: exit)
                     } else {
                         PlayerPoster(url: clip.coverURL)
                     }
@@ -220,21 +226,9 @@ struct DiscoverView: View {
     }
 
     private var lessonStatusPage: some View {
-        let ready = loadedUserID != nil && loadedUserID == api.session?.userId.value
-        let empty = ready && feed.entries.isEmpty && !feed.loading && feed.error == nil
-        return ScenePage { _ in
+        ScenePage { _ in
             if api.session == nil {
                 ConnectionPanel(loadingTitle: "Connecting to the video service…")
-            } else if feed.loading || !ready {
-                HStack(spacing: 12) {
-                    ProgressView().tint(PulsePlayerStyle.accent).accessibilityHidden(true)
-                    LocalizedText(search.nilIfBlank == nil ? "Loading videos…" : "Finding video…")
-                        .font(.capture(.subheadline))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-                .pulsePlayerPanel(cornerRadius: 14)
             } else if let error = feed.error {
                 VStack(alignment: .leading, spacing: 12) {
                     MessagePanel(title: "Couldn’t load videos", message: error, actionTitle: "Try again") {
@@ -244,7 +238,7 @@ struct DiscoverView: View {
                         EmptyStateAction(title: "Edit link", symbol: .link, action: returnToLinkInput)
                     }
                 }
-            } else if empty {
+            } else {
                 let request = feed.emptySearch
                 VStack(alignment: .leading, spacing: 14) {
                     EmptyStateScene(appearance: request == nil ? .screening(.feed) : .inline(.search),
@@ -288,6 +282,63 @@ struct DiscoverView: View {
         if let onExit { onExit() } else { dismiss() }
     }
 
+}
+
+struct VideoLookupView: View {
+    let status: String
+    let cancel: (() -> Void)?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        GeometryReader { viewport in
+            ScrollView {
+                VStack(spacing: 18) {
+                    let mark = Image(decorative: "PulsePlayerLaunchMark").resizable().scaledToFit()
+                        .frame(width: 76, height: 76)
+                    if reduceMotion || scenePhase != .active {
+                        mark
+                    } else {
+                        mark.phaseAnimator([false, true]) { image, bright in
+                            image.scaleEffect(bright ? 1 : 0.95).opacity(bright ? 1 : 0.72)
+                        } animation: { _ in .easeInOut(duration: 1.1) }
+                    }
+                    LocalizedText(status)
+                        .font(.capture(.headline, weight: .medium))
+                        .foregroundStyle(PulsePlayerStyle.onDark)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity)
+                .pulsePlayerKeepControlsTogether()
+                .pageHorizontalMargins()
+                .padding(.vertical, 12)
+                .frame(minHeight: viewport.size.height)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let cancel {
+                Button(action: cancel) {
+                    LocalizedText("Cancel")
+                        .font(.capture(.subheadline, weight: .semibold))
+                        .foregroundStyle(PulsePlayerStyle.onDark)
+                        .padding(.horizontal, 22).frame(minHeight: 44)
+                        .pulsePlayerGlass(in: Capsule(), fallback: PulsePlayerStyle.mediaSurface, onDark: true)
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityIdentifier("player.exit")
+                .frame(maxWidth: .infinity)
+                .pulsePlayerKeepControlsTogether()
+                .pageHorizontalMargins()
+                .padding(.vertical, 12)
+            }
+        }
+        .pulsePlayerScreenBackground(PulsePlayerStyle.mediaBackdrop)
+        .preferredColorScheme(.dark)
+        .statusBarHidden()
+    }
 }
 
 struct PlayerScreen: View {
@@ -385,7 +436,8 @@ struct PlayerScreen: View {
 
     private func playerPages(_ entries: [PlaybackQueueEntry]) -> some View {
         let localPlaylist = entries.filter { $0.clip.playbackURL.isFileURL }
-        return PlaybackPager(activeID: $activeID, exit: exitPlayer) { size, insets in
+        let waitingForPlayer = activeID.flatMap { players.controllers[$0] } == nil
+        return PlaybackPager(activeID: $activeID, fallbackExit: waitingForPlayer ? exitPlayer : nil) { size, insets in
             ForEach(entries) { entry in
                 let clip = entry.clip
                 Group {
@@ -395,7 +447,7 @@ struct PlayerScreen: View {
                                  playback: playback, replaceMedia: feed.replaceMedia,
                                  didStartPlaying: { players.prepareNext(after: entry.id) },
                                  didStopPlaying: { if activeID == entry.id { players.suspend() } },
-                                 onSwipeExit: exitPlayer,
+                                 exit: exitPlayer,
                                  localPlaylist: localPlaylist,
                                  playlistEntryID: entry.id,
                                  selectPlaylistEntry: { activeID = $0 },
@@ -459,7 +511,7 @@ private enum PlayerTopControls {
 
 private struct PlaybackPager<Pages: View>: View {
     @Binding var activeID: String?
-    let exit: (() -> Void)?
+    let fallbackExit: (() -> Void)?
     @ViewBuilder var pages: (CGSize, EdgeInsets) -> Pages
 
     var body: some View {
@@ -479,7 +531,7 @@ private struct PlaybackPager<Pages: View>: View {
             .ignoresSafeArea(.container)
         }
         .overlay(alignment: .top) {
-            PlayerHeader(exit: exit, overMedia: true)
+            PlayerHeader(exit: fallbackExit, overMedia: true)
                 .padding(.top, PlayerTopControls.topInset)
         }
     }
@@ -948,6 +1000,7 @@ private struct ClipPage: View {
     @AppStorage(LocalPlaybackResume.enabledKey) private var resumesLocalPlayback = true
     @AppStorage(LocalPlaybackPreferences.speedKey) private var defaultLocalSpeed = 1.0
     @AppStorage(LocalPlaybackPreferences.loopKey) private var loopsLocalPlayback = false
+    @AppStorage(LocalPlaybackPreferences.rewindKey) private var rewindSeconds = LocalPlaybackPreferences.defaultRewind
     let clip: LessonClip
     let active: Bool
     let gesture: PlayerGesture
@@ -956,7 +1009,7 @@ private struct ClipPage: View {
     let replaceMedia: (LessonClip) -> Void
     var didStartPlaying: () -> Void = {}
     var didStopPlaying: () -> Void = {}
-    var onSwipeExit: () -> Void = {}
+    let exit: (() -> Void)?
     var localPlaylist: [PlaybackQueueEntry] = []
     var playlistEntryID: String? = nil
     var selectPlaylistEntry: (String) -> Void = { _ in }
@@ -1180,24 +1233,21 @@ private struct ClipPage: View {
                     if !controlsAreHidden {
                         playbackDock(height: dockHeight, bottomInset: max(0, (regions.dock ?? media).maxY - controls.maxY))
                             .inPlaybackFrame(controls, direction: layoutDirection, alignment: .bottom)
+                        lessonSettings
+                            .pulsePlayerGlass(in: Capsule(), tint: Self.panelTint,
+                                              fallback: PulsePlayerStyle.mediaSurface, interactive: false, onDark: true)
+                            .padding(.top, topPadding)
+                            .padding(.trailing, PlayerTopControls.edgeInset)
+                            .inPlaybackFrame(controls, direction: layoutDirection, alignment: .topTrailing)
                     }
-                    Group {
-                        if controlsAreHidden {
-                            showControlsButton
-                        } else {
-                            lessonSettings
-                                .pulsePlayerGlass(in: Capsule(), tint: Self.panelTint,
-                                                  fallback: PulsePlayerStyle.mediaSurface, interactive: false, onDark: true)
-                        }
-                    }
-                    .padding(.top, topPadding)
-                    .padding(.trailing, PlayerTopControls.edgeInset)
-                    .inPlaybackFrame(controls, direction: layoutDirection, alignment: .topTrailing)
 
                     if hintArea.height >= 76 {
                         PlayerGestureHint(eligible: canHideControls, gesture: gesture)
                             .padding(.horizontal, 14)
                             .inPlaybackFrame(hintArea, direction: layoutDirection, alignment: .leading)
+                            .opacity(controlsAreHidden ? 0 : 1)
+                            .accessibilityHidden(controlsAreHidden)
+                            .allowsHitTesting(false)
                     }
                     if controlsAreHidden && playback.isLoading {
                         PlayerLoadingFeedback(buffering: true, floating: true)
@@ -1240,22 +1290,7 @@ private struct ClipPage: View {
     private func swipeExit() {
         guard active, visible, phase == .active, !ads.isPresenting,
               !pagingGate, !hasOpenPanel, !scrubbing else { return }
-        onSwipeExit()
-    }
-
-    private var showControlsButton: some View {
-        let size = PlayerTopControls.buttonSize
-        return Button { setControlsHidden(false) } label: {
-            TintedArtwork(name: "PlayerMore", tint: PulsePlayerStyle.onDark)
-                .frame(width: 20, height: 20)
-                .frame(width: size, height: size)
-                .pulsePlayerGlass(in: Capsule(), tint: PulsePlayerStyle.mediaBackdrop.opacity(0.65),
-                            fallback: PulsePlayerStyle.mediaSurface, onDark: true)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(PressStyle())
-        .accessibilityLabel(LocalizedStringKey("Show playback controls"))
-        .accessibilityIdentifier("player.showControls")
+        exit?()
     }
 
     private func setControlsHidden(_ hidden: Bool) {
@@ -1323,8 +1358,11 @@ private struct ClipPage: View {
     private var dockContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             playbackFeedback
-            PlaybackFoldNavigation(videoTitle: clip.title, identity: foldID,
-                                   enabled: canControlPlayback && playback.error == nil, jump: jumpToFold)
+            HStack(spacing: 10) {
+                if let exit { PlayerExitButton(overMedia: true, action: exit) }
+                PlaybackFoldNavigation(videoTitle: clip.title, identity: foldID,
+                                       enabled: canControlPlayback && playback.error == nil, jump: jumpToFold)
+            }
             if playback.error == nil {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 12) {
@@ -1436,7 +1474,7 @@ private struct ClipPage: View {
 
     private var transportButtons: some View {
         HStack(spacing: 2) {
-            if localIdentity != nil { skipButton(seconds: -10) }
+            if localIdentity != nil { skipButton(seconds: -Double(LocalPlaybackPreferences.rewindSeconds(rewindSeconds))) }
             Button(action: togglePlayback) {
                 Glyph(symbol: playback.intendsPlayback ? .pause : .play, size: 19,
                       tint: PulsePlayerStyle.mediaBackdrop)
@@ -1483,8 +1521,10 @@ private struct ClipPage: View {
     }
 
     private func skipButton(seconds: Double) -> some View {
-        let label = seconds < 0 ? "Back 10 seconds" : "Forward 10 seconds"
         let amount = Int(abs(seconds)).formatted(.number.locale(locale))
+        let language = AppLanguage.from(locale)
+        let label = seconds < 0 ? L10n.format("Back %@ seconds", [amount], language: language)
+                                : L10n.text("Forward 10 seconds", language: language)
         return Button {
             let duration = playback.timeline.duration
             guard duration > 0 else { return }
@@ -1498,7 +1538,7 @@ private struct ClipPage: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressStyle())
-        .accessibilityLabel(LocalizedStringKey(label))
+        .accessibilityLabel(Text(verbatim: label))
         .disabled(!canControlPlayback || playback.error != nil)
     }
 
@@ -1599,9 +1639,9 @@ private struct ClipPage: View {
         if let channel = channelAfterTools {
             channelAfterTools = nil
             guard active, visible, !pagingGate else { return }
-            if channel.id == returningToChannel?.id {
+            if channel.id == returningToChannel?.id, let exit {
                 resumeAfterSheet = false
-                onSwipeExit()
+                exit()
             } else {
                 presentedSource = channel
             }

@@ -15,7 +15,7 @@
                         <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                         <subviews>
-                            <imageView userInteractionEnabled="NO" contentMode="scaleAspectFit" image="LaunchMark" translatesAutoresizingMaskIntoConstraints="NO" id="launch-mark">
+                            <imageView userInteractionEnabled="NO" contentMode="scaleAspectFit" image="PulsePlayerLaunchMark" translatesAutoresizingMaskIntoConstraints="NO" id="launch-mark">
                                 <rect key="frame" x="140.5" y="382.5" width="112" height="112"/>
                             </imageView>
                         </subviews>
@@ -32,7 +32,7 @@
         </scene>
     </scenes>
     <resources>
-        <image name="LaunchMark" width="112" height="112"/>
+        <image name="PulsePlayerLaunchMark" width="112" height="112"/>
         <namedColor name="StartupBackground"><color red="0.937255" green="0.960784" blue="0.988235" alpha="1" colorSpace="custom" customColorSpace="sRGB"/></namedColor>
     </resources>
 </document>

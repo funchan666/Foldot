@@ -325,14 +325,20 @@ final class RewardedAds: NSObject, ObservableObject, FullScreenContentDelegate {
         isPreparingAppOpen = true
         // Bound only this presentation opportunity. A slow network must not keep
         // the home screen locked or discard inventory for the next foreground.
-        let waitingBudget = coldStart ? 2.0 : 1.0
+        let testMode = commerce.api.configuration.adsTestMode
+        let demoPlacement = testMode ? GoogleDemoAds.placement(for: 1, packagedAppID: packagedAppID) : nil
+        let coldStartBudget = demoPlacement == nil ? 2.0 : 8.0
+        let waitingBudget = coldStart ? coldStartBudget : 1.0
         appOpenStage = "authentication"
         appOpenLog.info("App-open opportunity started; coldStart=\(coldStart), budget=\(waitingBudget)")
         scheduleAppOpenDeadline(attempt: attempt, seconds: waitingBudget)
         appOpenTask = Task { [weak self] in
             guard let self else { return }
-            let testMode = commerce.api.configuration.adsTestMode
-            let demoPlacement = testMode ? GoogleDemoAds.placement(for: 1, packagedAppID: self.packagedAppID) : nil
+            // The bundled demo unit is known before login. Use the same in-flight
+            // inventory request when the account and display interval are ready.
+            if let demoPlacement, !commerce.premium {
+                Task { try? await self.preloadAppOpen(demoPlacement) }
+            }
             do {
                 try await commerce.api.prepareVisitor()
                 try Task.checkCancellation()
@@ -341,10 +347,6 @@ final class RewardedAds: NSObject, ObservableObject, FullScreenContentDelegate {
                 }
                 if self.appOpenAttempt == attempt { self.appOpenStage = "rights-and-configuration" }
                 self.appOpenLog.info("App-open guest authentication ready")
-                if let demoPlacement, !commerce.premium {
-                    // Demo inventory can load during verification. Presentation still checks account rights.
-                    Task { try? await self.preloadAppOpen(demoPlacement) }
-                }
                 let reuseVerifiedDemoRights = !coldStart && demoPlacement != nil && commerce.verifiedCurrentAccount
                 defer {
                     if reuseVerifiedDemoRights, commerce.api.session?.userId.value == owner {

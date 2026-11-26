@@ -129,6 +129,13 @@ struct LibraryView: View {
             let stacked = width < 310 || typeSize.isAccessibilitySize || PulsePlayerStyle.intersectsReservedRegion(bounds, in: container)
             let entries = practiceEntries
             VStack(alignment: .leading, spacing: 12) {
+                PlusEntryButton(style: .library) {
+                    findingFold = false
+                    showsShortcuts = false
+                    openPlus()
+                }
+                .pulsePlayerKeepControlsTogether()
+
                 let tools = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
                                     : AnyLayout(HStackLayout(spacing: 8))
                 tools {
@@ -218,8 +225,6 @@ struct LibraryView: View {
                 .accessibilityIdentifier("library.history")
             shortcut("Editing tools", symbol: .edit, action: openTools)
                 .accessibilityIdentifier("library.tools")
-            shortcut("PulsePlayer Plus", symbol: .pass, action: openPlus)
-                .accessibilityIdentifier("membership.tabEntry")
         }
         .padding(.horizontal, 14).padding(.vertical, 6)
         .pulsePlayerGlass(in: .rect(cornerRadius: 18), interactive: false)
@@ -845,6 +850,8 @@ private struct FoldLibraryIndex: View {
     @State private var query = ""
     @State private var status = Status.all
     @State private var expanded: FoldPracticeID?
+    @State private var clearing: FoldPracticeEntry?
+    @EnvironmentObject private var library: LibraryStore
 
     private enum Status: String, CaseIterable {
         case all = "All sessions"
@@ -957,6 +964,28 @@ private struct FoldLibraryIndex: View {
                 }
             }
         }
+        .sheet(item: $clearing) { entry in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    SheetToolbar(context: "Clear all marks?", showsConfirmation: true) { clearing = nil }
+                    Text(verbatim: entry.clip.title).font(.capture(.headline))
+                    LocalizedText("This removes every fold mark from this video.")
+                        .font(.capture(.subheadline)).foregroundStyle(PulsePlayerStyle.secondary)
+                    Button(role: .destructive) {
+                        do {
+                            try FoldPracticeStore.shared.clearMarks(in: entry.id)
+                            if expanded == entry.id { expanded = nil }
+                        } catch { library.error = error.localizedDescription }
+                        clearing = nil
+                    } label: { LocalizedText("Clear all marks") }
+                    .buttonStyle(LibraryMovieActionStyle(symbol: .close))
+                    Button("Cancel") { clearing = nil }.buttonStyle(CompactActionStyle())
+                }
+                .pulsePlayerPage()
+            }
+            .pulsePlayerScreenBackground()
+            .presentationDetents([.medium, .large])
+        }
     }
 
     @ViewBuilder private var emptyActions: some View {
@@ -1038,24 +1067,53 @@ private struct FoldLibraryIndex: View {
         if isOpen {
             Divider().padding(.vertical, 8)
             ForEach(group.marks) { mark in
-                Button { play(entry.id, mark.id) } label: {
-                    HStack(alignment: .center, spacing: 10) {
-                        Text(verbatim: durationLabel(mark.step.start))
-                            .font(.capture(.footnote, weight: .semibold)).monospacedDigit()
-                            .foregroundStyle(PulsePlayerStyle.accent)
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(PulsePlayerStyle.mist, in: .rect(cornerRadius: 7))
-                        Text(verbatim: mark.name ?? mark.numberLabel)
-                            .font(.capture(.body, weight: .medium))
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 2)
-                        Glyph(symbol: .play, size: 13, tint: PulsePlayerStyle.accent).accessibilityHidden(true)
+                let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
+                                     : AnyLayout(HStackLayout(spacing: 4))
+                layout {
+                    Button { play(entry.id, mark.id) } label: {
+                        HStack(alignment: .center, spacing: 10) {
+                            Text(verbatim: durationLabel(mark.step.start))
+                                .font(.capture(.footnote, weight: .semibold)).monospacedDigit()
+                                .foregroundStyle(PulsePlayerStyle.accent)
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(PulsePlayerStyle.mist, in: .rect(cornerRadius: 7))
+                            Text(verbatim: mark.name ?? mark.numberLabel)
+                                .font(.capture(.body, weight: .medium))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 2)
+                            Glyph(symbol: .play, size: 13, tint: PulsePlayerStyle.accent).accessibilityHidden(true)
+                        }
+                        .padding(.leading, 10).padding(.vertical, 3)
+                        .frame(minHeight: 44).contentShape(Rectangle())
                     }
-                    .padding(.leading, 10).padding(.vertical, 3)
-                    .frame(minHeight: 44).contentShape(Rectangle())
+                    .buttonStyle(PressStyle()).multilineTextAlignment(.leading)
+                    .accessibilityHint(Text("Play from this fold"))
+                    Button(role: .destructive) {
+                        do {
+                            try FoldPracticeStore.shared.removeMark(mark.id, in: entry.id)
+                            if entry.steps.count == 1, expanded == entry.id { expanded = nil }
+                        } catch { library.error = error.localizedDescription }
+                    } label: {
+                        LocalizedText("Unmark")
+                            .font(.capture(.footnote, weight: .medium))
+                            .foregroundStyle(PulsePlayerStyle.danger)
+                            .padding(.horizontal, 8).frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle())
+                    .accessibilityValue(Text(verbatim: (mark.name ?? mark.numberLabel) + ", " + durationLabel(mark.step.start)))
                 }
-                .buttonStyle(PressStyle()).multilineTextAlignment(.leading)
-                .accessibilityHint(Text("Play from this fold"))
+            }
+            if !searching && entry.steps.count > 1 {
+                Divider()
+                Button(role: .destructive) { clearing = entry } label: {
+                    LocalizedText("Clear all marks")
+                        .font(.capture(.footnote, weight: .semibold))
+                        .foregroundStyle(PulsePlayerStyle.danger)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(PressStyle())
+                .accessibilityValue(Text(verbatim: entry.clip.title))
             }
         }
     }
