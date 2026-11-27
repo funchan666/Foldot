@@ -187,7 +187,11 @@ final class LibraryStore: ObservableObject {
         try persist(next)
     }
     // Internal IDs stay stable; only the user-facing shared copy gets a readable name.
-    func shareFile(for movie: PracticeRecording) async throws -> URL {
+    func shareFile(for movie: PracticeRecording, beforeSharing: (@MainActor () throws -> Void)? = nil) async throws -> URL {
+        guard !movie.isExport || beforeSharing != nil else {
+            throw PulsePlayerError.service("An active Plus subscription is required to export.")
+        }
+        try beforeSharing?()
         let source = url(for: movie)
         let title = movie.title
         let task = Task.detached(priority: .userInitiated) {
@@ -223,6 +227,7 @@ final class LibraryStore: ObservableObject {
         } onCancel: { task.cancel() }
         do {
             try Task.checkCancellation()
+            try beforeSharing?()
             return destination
         } catch {
             try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
@@ -274,8 +279,9 @@ final class LibraryStore: ObservableObject {
         try await storeMovie(source, exported: false, title: title, folderID: folderID)
     }
 
-    func saveExport(_ source: URL, title: String, beforeCommit: (@MainActor () throws -> Void)? = nil) async throws -> PracticeRecording {
-        try await storeMovie(source, exported: true, title: title, folderID: nil, beforeCommit: beforeCommit)
+    func saveExport(_ source: URL, title: String, beforeCommit: @escaping @MainActor () throws -> Void) async throws -> PracticeRecording {
+        try beforeCommit()
+        return try await storeMovie(source, exported: true, title: title, folderID: nil, beforeCommit: beforeCommit)
     }
 
     private func storeMovie(_ source: URL, exported: Bool, title: String?, folderID: UUID?,

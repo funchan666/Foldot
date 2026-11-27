@@ -220,6 +220,7 @@ struct EditorSheet: View {
     }
 }
 struct EditorWorkspace: View {
+    private var exportAccess = PlusExportAccess()
     @EnvironmentObject private var departure: ExportDeparture
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var ads: RewardedAds
@@ -267,7 +268,7 @@ struct EditorWorkspace: View {
         departure.running || editor.isExporting || editor.isPreparingPreview || sharingExport
     }
     private var canPlay: Bool {
-        scenePhase == .active && !ads.isPresenting && shareURL == nil && frameComparison == nil
+        scenePhase == .active && !ads.isPresenting && !exportAccess.isPresenting && shareURL == nil && frameComparison == nil
     }
     private var operationError: String? {
         guard !departure.running else { return nil }
@@ -331,6 +332,10 @@ struct EditorWorkspace: View {
             .dismissKeyboardOnOutsideTap($editingRangeName, scope: "editor-range-name")
             .interactiveDismissDisabled(importing || departure.running)
             .sheet(item: $shareURL) { ShareSheet(items: [$0.url]) }
+            .fullScreenCover(isPresented: exportAccess.presentation) { MembershipView() }
+            .onChange(of: exportAccess.isPresenting) { _, presenting in
+                if presenting { interruptPreview() } else { resumePreviewIfPossible() }
+            }
             .fullScreenCover(isPresented: $showingFullScreenPreview, onDismiss: {
                 inlinePreviewAttached = true
             }) {
@@ -371,7 +376,7 @@ struct EditorWorkspace: View {
                 if presenting { interruptPreview() } else { resumePreviewIfPossible() }
             }
             .onDisappear {
-                guard inlinePreviewAttached, shareURL == nil, frameComparison == nil else { return }
+                guard inlinePreviewAttached, !exportAccess.isPresenting, shareURL == nil, frameComparison == nil else { return }
                 openedRequest = nil
                 editor.close()
                 exportTask?.cancel()
@@ -776,8 +781,9 @@ struct EditorWorkspace: View {
         sharingExport = true
         shareTask = Task {
             defer { sharingExport = false; shareTask = nil }
+            guard let checkAccess = await exportAccess.authorize(reportingTo: $error) else { return }
             do {
-                let url = try await library.shareFile(for: movie)
+                let url = try await library.shareFile(for: movie, beforeSharing: checkAccess)
                 if !Task.isCancelled { shareURL = SharedFile(url: url) }
             }
             catch is CancellationError { }
@@ -790,11 +796,13 @@ struct EditorWorkspace: View {
         error = nil
         exportTask = Task {
             defer { exportTask = nil; departure.finish() }
+            guard let checkAccess = await exportAccess.authorize(reportingTo: $error) else { return }
             guard let output = await editor.export(audioOnly: audio) else { return }
             if Task.isCancelled { try? FileManager.default.removeItem(at: output); return }
             do {
                 defer { try? FileManager.default.removeItem(at: output) }
-                let saved = try await library.saveExport(output, title: title + L10n.text(audio ? " · Audio" : " · Edit"))
+                let saved = try await library.saveExport(output, title: title + L10n.text(audio ? " · Audio" : " · Edit"),
+                                                         beforeCommit: checkAccess)
                 if !Task.isCancelled { savedExport = saved }
             } catch is CancellationError { }
             catch { self.error = "The export finished but could not be added to your library. \(error.localizedDescription)" }
@@ -942,6 +950,40 @@ private struct EditorCommand: View {
                 .contentShape(Rectangle())
             }
         }.buttonStyle(PressStyle())
+    }
+}
+
+/// Present Plus from the surface that initiated the export, including nested editors and sheets.
+@MainActor
+struct PlusExportAccess: DynamicProperty {
+    @EnvironmentObject private var commerce: CommerceStore
+    @State private(set) var isPresenting = false
+
+    init() {}
+
+    var presentation: Binding<Bool> { $isPresenting }
+
+    /// Recheck the same account and expiry before handing off an asynchronously prepared file.
+    func authorize(reportingTo error: Binding<String?>) async -> (@MainActor () throws -> Void)? {
+        let owner = commerce.api.session?.userId.value
+        if owner != nil, !commerce.premium, !commerce.verifiedCurrentAccount {
+            await commerce.refresh()
+        }
+        guard !Task.isCancelled, owner == commerce.api.session?.userId.value else { return nil }
+        if owner != nil, !commerce.premium, !commerce.verifiedCurrentAccount {
+            error.wrappedValue = "Couldn’t verify Plus access. Try again when connected."
+            return nil
+        }
+        guard let owner, commerce.premium else {
+            isPresenting = true
+            return nil
+        }
+        return { [commerce] in
+            try Task.checkCancellation()
+            guard commerce.api.session?.userId.value == owner, commerce.premium else {
+                throw PulsePlayerError.service("An active Plus subscription is required to export.")
+            }
+        }
     }
 }
 
@@ -1334,6 +1376,7 @@ private struct RangeFrameComparison: View {
 
 @MainActor
 private struct RangeShareActions: View {
+    var exportAccess = PlusExportAccess()
     private enum Format { case comparison, stills }
 
     @Environment(\.locale) private var locale
@@ -1351,6 +1394,7 @@ private struct RangeShareActions: View {
             if let exportError { ErrorNote(message: exportError) }
         }
         .sheet(item: $sharedStills) { ShareSheet(items: $0.files) }
+        .fullScreenCover(isPresented: exportAccess.presentation) { MembershipView() }
         .onDisappear { exportTask?.cancel() }
     }
 
@@ -1383,6 +1427,7 @@ private struct RangeShareActions: View {
         let language = AppLanguage.from(locale)
         exportTask = Task {
             defer { exportTask = nil; busy = false }
+            guard let checkAccess = await exportAccess.authorize(reportingTo: $exportError) else { return }
             var staged: SharedRangeStills?
             do {
                 try Task.checkCancellation()
@@ -1392,7 +1437,7 @@ private struct RangeShareActions: View {
                     try await writer.value
                 } onCancel: { writer.cancel() }
                 staged = result
-                try Task.checkCancellation()
+                try checkAccess()
                 sharedStills = result
             } catch {
                 if let staged { try? FileManager.default.removeItem(at: staged.folder) }

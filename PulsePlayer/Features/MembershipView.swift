@@ -201,6 +201,15 @@ struct MembershipView: View {
             } else {
                 stackedBenefits
             }
+
+            HStack(alignment: .firstTextBaseline, spacing: 9) {
+                Glyph(symbol: .download, size: 16, tint: PulsePlayerStyle.mediaAccent)
+                    .accessibilityHidden(true)
+                LocalizedText("Export video, audio, frames, and fold times")
+                    .font(.capture(.subheadline, weight: .semibold))
+                    .foregroundStyle(PulsePlayerStyle.onDark)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.horizontal, 18)
         .padding(.top, 4)

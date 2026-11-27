@@ -576,3 +576,7 @@
 "Pause between folds" = "折り目ごとに一時停止";
 "In hands-free practice, tap play to start the next fold." = "ハンズフリー練習中は、再生をタップすると次の手順に進みます。";
 "Tap play when you’re ready for the next fold." = "次の手順に進む準備ができたら、再生をタップしてください。";
+"Export video, audio, frames, and fold times" = "動画・音声・静止画・折り目のタイムコードを書き出す";
+"Swipe left to close the player" = "左にスワイプしてプレーヤーを閉じる";
+"An active Plus subscription is required to export." = "書き出しには有効な Plus サブスクリプションが必要です。";
+"Open folder" = "フォルダを開く";

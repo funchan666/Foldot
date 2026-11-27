@@ -576,3 +576,7 @@
 "Pause between folds" = "Pausa entre pliegues";
 "In hands-free practice, tap play to start the next fold." = "En la práctica manos libres, pulsa reproducir para empezar el siguiente pliegue.";
 "Tap play when you’re ready for the next fold." = "Pulsa reproducir cuando quieras pasar al siguiente pliegue.";
+"Export video, audio, frames, and fold times" = "Exporta vídeos, audio, fotogramas y marcas de tiempo";
+"Swipe left to close the player" = "Desliza hacia la izquierda para cerrar el reproductor";
+"An active Plus subscription is required to export." = "Necesitas una suscripción a Plus activa para exportar.";
+"Open folder" = "Abrir carpeta";

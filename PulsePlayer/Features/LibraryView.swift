@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 
 struct LibraryView: View {
+    var exportAccess = PlusExportAccess()
     @EnvironmentObject private var api: APIClient
     @ObservedObject private var practice = FoldPracticeStore.shared
     @State private var showsShortcuts = false
@@ -27,6 +28,7 @@ struct LibraryView: View {
     @State private var removingDownload: OfflineVideo?
     @State private var expandedMovieActionsID: UUID?
     @State private var sharingMovieID: UUID?
+    @State private var shareTask: Task<Void, Never>?
     @State private var editingDownloadID: String?
     @Binding var selectedFolderID: UUID?
     @State private var folderAction: FolderAction?
@@ -118,7 +120,7 @@ struct LibraryView: View {
     }
 
     private var presentingContent: Bool {
-        findingFold || player != nil || folderAction != nil || sharing != nil
+        findingFold || player != nil || folderAction != nil || sharing != nil || exportAccess.isPresenting
             || removing != nil || removingDownload != nil || selectedFolderID != nil
     }
 
@@ -170,6 +172,8 @@ struct LibraryView: View {
             }
             .onChange(of: library.listRequest) { _, _ in expandedMovieActionsID = nil }
             .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
+            .fullScreenCover(isPresented: exportAccess.presentation) { MembershipView() }
+            .onDisappear { shareTask?.cancel() }
             .fullScreenCover(item: $player) { PlayerScreen(route: $0) }
             .sheet(item: $folderAction) { action in folderSheet(action) }
             .sheet(item: $removingDownload) { video in
@@ -626,7 +630,7 @@ struct LibraryView: View {
                     if let channel = clip.channel.nilIfBlank { Text(verbatim: channel) }
                 }
             }.buttonStyle(PressStyle())
-            IconButton(symbol: .bookmark, label: "Remove from favorites") { library.toggle(clip) }
+            IconButton(symbol: .bookmarkFilled, label: "Remove from favorites", selected: true) { library.toggle(clip) }
         }
         .modifier(LibraryRowSurface())
     }
@@ -829,10 +833,20 @@ struct LibraryView: View {
     }
 
     private func shareMovie(_ movie: PracticeRecording) {
+        guard shareTask == nil else { return }
         sharingMovieID = movie.id
-        Task {
-            defer { sharingMovieID = nil }
-            do { sharing = SharedFile(url: try await library.shareFile(for: movie)) }
+        shareTask = Task {
+            defer { sharingMovieID = nil; shareTask = nil }
+            do {
+                let url: URL
+                if movie.isExport {
+                    guard let checkAccess = await exportAccess.authorize(reportingTo: $library.error) else { return }
+                    url = try await library.shareFile(for: movie, beforeSharing: checkAccess)
+                } else {
+                    url = try await library.shareFile(for: movie)
+                }
+                sharing = SharedFile(url: url)
+            } catch is CancellationError { }
             catch { library.error = error.localizedDescription }
         }
     }
@@ -1399,6 +1413,7 @@ struct DownloadCompletionNotice: View {
 
 // Uncached exports use the same download admission and completion journal.
 private struct OfflineExportButton: View {
+    var exportAccess = PlusExportAccess()
     let clip: LessonClip
     @EnvironmentObject private var departure: ExportDeparture
     @EnvironmentObject private var library: LibraryStore
@@ -1434,6 +1449,7 @@ private struct OfflineExportButton: View {
             if let exportError { ErrorNote(message: exportError) }
         }
         .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
+        .fullScreenCover(isPresented: exportAccess.presentation) { MembershipView() }
         .onDisappear { exportTask?.cancel() }
     }
 
@@ -1442,8 +1458,9 @@ private struct OfflineExportButton: View {
         exportError = nil
         exportTask = Task {
             defer { exportTask = nil }
+            guard let checkAccess = await exportAccess.authorize(reportingTo: $exportError) else { return }
             do {
-                let url = try await library.shareFile(for: recording)
+                let url = try await library.shareFile(for: recording, beforeSharing: checkAccess)
                 if !Task.isCancelled { sharing = SharedFile(url: url) }
             } catch is CancellationError { }
             catch { exportError = error.localizedDescription }
@@ -1455,6 +1472,7 @@ private struct OfflineExportButton: View {
         exportError = nil
         exportTask = Task { @MainActor in
             defer { exportTask = nil; preparingSource = false; departure.finish() }
+            guard let checkAccess = await exportAccess.authorize(reportingTo: $exportError) else { return }
             var converted: URL?
             defer { if let converted { try? FileManager.default.removeItem(at: converted) } }
             do {
@@ -1475,7 +1493,10 @@ private struct OfflineExportButton: View {
                     output = destination
                 }
                 try Task.checkCancellation()
-                let recording = try await library.saveExport(output, title: clip.title, beforeCommit: source.checkOwner)
+                let recording = try await library.saveExport(output, title: clip.title) {
+                    try checkAccess()
+                    try source.checkOwner?()
+                }
                 if !Task.isCancelled { savedExport = recording }
             } catch is CancellationError { }
             catch {

@@ -108,7 +108,7 @@ struct FoldPracticeControls: View {
                     LocalizedText("Play %@ of %@", String(guide.pass), String(guide.playsPerFold))
                         .font(.capture(.subheadline)).monospacedDigit()
                 }
-                Glyph(symbol: .bookmark, size: 18, tint: PulsePlayerStyle.onDark)
+                Glyph(symbol: .fold, size: 18, tint: PulsePlayerStyle.onDark)
             }
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())

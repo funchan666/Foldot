@@ -576,3 +576,7 @@
 "Pause between folds" = "توقف بين الطيات";
 "In hands-free practice, tap play to start the next fold." = "في التدريب التلقائي، اضغط على التشغيل لبدء الطية التالية.";
 "Tap play when you’re ready for the next fold." = "اضغط على التشغيل عندما تكون مستعدًا للطية التالية.";
+"Export video, audio, frames, and fold times" = "تصدير الفيديو والصوت والإطارات وتوقيتات الطيات";
+"Swipe left to close the player" = "اسحب إلى اليسار لإغلاق المشغّل";
+"An active Plus subscription is required to export." = "تحتاج إلى اشتراك Plus نشط للتصدير.";
+"Open folder" = "فتح المجلد";

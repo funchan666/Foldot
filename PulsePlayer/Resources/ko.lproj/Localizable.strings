@@ -576,3 +576,7 @@
 "Pause between folds" = "단계 사이에 일시 정지";
 "In hands-free practice, tap play to start the next fold." = "핸즈프리 연습 중에는 재생을 눌러 다음 단계로 넘어가세요.";
 "Tap play when you’re ready for the next fold." = "다음 단계를 시작할 준비가 되면 재생을 누르세요.";
+"Export video, audio, frames, and fold times" = "동영상, 오디오, 정지 이미지 및 접기 단계의 시간 내보내기";
+"Swipe left to close the player" = "왼쪽으로 쓸어넘겨 플레이어 닫기";
+"An active Plus subscription is required to export." = "내보내려면 활성 Plus 구독이 필요합니다.";
+"Open folder" = "폴더 열기";

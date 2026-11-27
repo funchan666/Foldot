@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct FoldNotebookView: View {
+    var exportAccess = PlusExportAccess()
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var api: APIClient
     @EnvironmentObject private var library: LibraryStore
@@ -11,6 +12,7 @@ struct FoldNotebookView: View {
     @State private var error: String?
     @State private var export: FoldTimesCSV?
     @State private var exporting = false
+    @State private var csvTask: Task<Void, Never>?
     let openExport: (FoldPracticeEntry) -> Void
     @State private var importing = false
 
@@ -41,6 +43,8 @@ struct FoldNotebookView: View {
         .foregroundStyle(PulsePlayerStyle.paper)
         .pulsePlayerScreenBackground()
         .fullScreenCover(item: $player) { PlayerScreen(route: $0) }
+        .fullScreenCover(isPresented: exportAccess.presentation) { MembershipView() }
+        .onDisappear { csvTask?.cancel() }
         .fileExporter(isPresented: $exporting, document: export, contentType: .commaSeparatedText,
                       defaultFilename: "PulsePlayer-fold-times") { result in
             if case .failure(let problem) = result { error = problem.localizedDescription }
@@ -124,8 +128,14 @@ struct FoldNotebookView: View {
         GlassActionMenu(title: "Export", items: [
             ActionMenuItem("Export a fold", .edit) { openExport(entry) },
             ActionMenuItem("Export fold times", .download) {
-                export = FoldTimesCSV(entry)
-                exporting = true
+                guard csvTask == nil, !exporting else { return }
+                error = nil
+                csvTask = Task { @MainActor in
+                    defer { csvTask = nil }
+                    guard await exportAccess.authorize(reportingTo: $error) != nil else { return }
+                    export = FoldTimesCSV(entry)
+                    exporting = true
+                }
             }
         ]) {
             HStack(spacing: 6) {
@@ -138,6 +148,7 @@ struct FoldNotebookView: View {
 }
 
 struct FoldClipExportView: View {
+    private var exportAccess = PlusExportAccess()
     let entry: FoldPracticeEntry
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
@@ -200,6 +211,7 @@ struct FoldClipExportView: View {
         .sceneBack(context: "Export a fold", disabled: working != nil) { dismiss() }
         .foregroundStyle(PulsePlayerStyle.paper).pulsePlayerScreenBackground()
         .sheet(item: $sharing) { ShareSheet(items: [$0.url]) }
+        .fullScreenCover(isPresented: exportAccess.presentation) { MembershipView() }
         .navigationBarBackButtonHidden(true)
         .onDisappear { working?.cancel() }
     }
@@ -215,6 +227,7 @@ struct FoldClipExportView: View {
         let title = entry.clip.title + " · " + name(for: step, at: index)
         working = Task { @MainActor in
             defer { working = nil; preparingSource = false }
+            guard let checkAccess = await exportAccess.authorize(reportingTo: $error) else { return }
             let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
             defer { try? FileManager.default.removeItem(at: output) }
             do {
@@ -237,7 +250,10 @@ struct FoldClipExportView: View {
                 try Task.checkCancellation()
                 try await VideoEditor.writeFold(step, in: entry, source: source.url, destination: output)
                 try Task.checkCancellation()
-                saved = try await library.saveExport(output, title: title, beforeCommit: source.checkOwner)
+                saved = try await library.saveExport(output, title: title) {
+                    try checkAccess()
+                    try source.checkOwner?()
+                }
             } catch {
                 if !Task.isCancelled { self.error = error.localizedDescription }
             }
@@ -249,8 +265,9 @@ struct FoldClipExportView: View {
         error = nil
         working = Task {
             defer { working = nil }
+            guard let checkAccess = await exportAccess.authorize(reportingTo: $error) else { return }
             do {
-                let url = try await library.shareFile(for: movie)
+                let url = try await library.shareFile(for: movie, beforeSharing: checkAccess)
                 try Task.checkCancellation()
                 sharing = SharedFile(url: url)
             } catch {

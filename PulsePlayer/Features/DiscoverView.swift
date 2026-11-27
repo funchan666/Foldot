@@ -197,7 +197,7 @@ struct DiscoverView: View {
                 Group {
                     if let playback = players.controllers[entry.id] {
                         ClipPage(clip: clip, active: activeID == entry.id,
-                                 gesture: .forVideo(entry.id, in: feed.entries), safeInsets: insets,
+                                 gesture: .forVideo(entry.id, in: feed.entries, canExit: exit != nil), safeInsets: insets,
                                  playback: playback, replaceMedia: feed.replaceMedia,
                                  didStartPlaying: { players.prepareNext(after: entry.id) },
                                  didStopPlaying: { if activeID == entry.id { players.suspend() } },
@@ -443,7 +443,7 @@ struct PlayerScreen: View {
                 Group {
                     if let playback = players.controllers[entry.id] {
                         ClipPage(clip: clip, active: activeID == entry.id,
-                                 gesture: .forVideo(entry.id, in: entries), safeInsets: insets,
+                                 gesture: .forVideo(entry.id, in: entries, canExit: true), safeInsets: insets,
                                  playback: playback, replaceMedia: feed.replaceMedia,
                                  didStartPlaying: { players.prepareNext(after: entry.id) },
                                  didStopPlaying: { if activeID == entry.id { players.suspend() } },
@@ -511,8 +511,16 @@ private enum PlayerTopControls {
 
 private struct PlaybackPager<Pages: View>: View {
     @Binding var activeID: String?
+    @Environment(\.playerScrolledTo) private var playerScrolledTo
     let fallbackExit: (() -> Void)?
     @ViewBuilder var pages: (CGSize, EdgeInsets) -> Pages
+
+    private var scrollSelection: Binding<String?> {
+        Binding(get: { activeID }, set: { target in
+            if let target, activeID != target { playerScrolledTo(target) }
+            activeID = target
+        })
+    }
 
     var body: some View {
         GeometryReader { safeViewport in
@@ -524,7 +532,7 @@ private struct PlaybackPager<Pages: View>: View {
                     .scrollTargetLayout()
                 }
                 .scrollTargetBehavior(.paging)
-                .scrollPosition(id: $activeID, anchor: .top)
+                .scrollPosition(id: scrollSelection, anchor: .top)
                 .scrollIndicators(.hidden)
                 .clipped()
             }
@@ -553,10 +561,15 @@ private func localPlaybackIdentity(for clip: LessonClip, library: LibraryStore,
 }
 
 private struct PlaybackGateKey: EnvironmentKey { static let defaultValue = false }
+private struct PlayerScrolledToKey: EnvironmentKey { static let defaultValue: (String) -> Void = { _ in } }
 private extension EnvironmentValues {
     var playbackGatePresented: Bool {
         get { self[PlaybackGateKey.self] }
         set { self[PlaybackGateKey.self] = newValue }
+    }
+    var playerScrolledTo: (String) -> Void {
+        get { self[PlayerScrolledToKey.self] }
+        set { self[PlayerScrolledToKey.self] = newValue }
     }
 }
 
@@ -574,9 +587,10 @@ private struct PlayerPagingAccess: ViewModifier {
     @State private var showingWatchOptions = false
     @State private var promptedOnOpen = false
     @State private var swipeOrigin: String?
+    @State private var swipedToID: String?
     @State private var trackingSwipe = false
     @State private var swipeEnded: UUID?
-    @AppStorage(PlayerGesture.swipeHintKey) private var completedHint = false
+    @AppStorage(PlayerGesture.pagingGuideKey) private var completedHint = false
 
     private var watchRewardEligible: Bool {
         quota.canRequestReward(for: .watch, premium: commerce.premium)
@@ -585,6 +599,9 @@ private struct PlayerPagingAccess: ViewModifier {
     func body(content: Content) -> some View {
         content
             .environment(\.playbackGatePresented, showingWatchOptions)
+            .environment(\.playerScrolledTo, { id in
+                if trackingSwipe && !completedHint { swipedToID = id }
+            })
             .simultaneousGesture(DragGesture(minimumDistance: 12).onChanged { value in
                 guard !showingWatchOptions, abs(value.translation.height) > abs(value.translation.width) else { return }
                 if !trackingSwipe { trackingSwipe = true; swipeOrigin = admittedID; swipeEnded = nil }
@@ -592,7 +609,7 @@ private struct PlayerPagingAccess: ViewModifier {
             .task(id: swipeEnded) {
                 guard swipeEnded != nil else { return }
                 do { try await Task.sleep(for: .milliseconds(700)) } catch { return }
-                trackingSwipe = false; swipeOrigin = nil
+                trackingSwipe = false; swipeOrigin = nil; swipedToID = nil
             }
             .onAppear { admit(selectedID) }
             .onChange(of: selectedID) { _, value in admit(value) }
@@ -608,6 +625,8 @@ private struct PlayerPagingAccess: ViewModifier {
         return clip.playbackURL.isFileURL || quota.mayWatch(clip.id, premium: commerce.premium)
     }
     private func admit(_ id: String?) {
+        let swipedToTarget = swipedToID != nil && swipedToID == id
+        if swipedToID != nil { swipedToID = nil }
         guard !showingWatchOptions, let id else { return }
         if let admittedID, !entries.contains(where: { $0.id == admittedID }) { self.admittedID = nil }
         let isTail = id == tailID
@@ -617,7 +636,7 @@ private struct PlayerPagingAccess: ViewModifier {
         if isTail { quota.resetIfNeeded() }
         if canWatch(id) || (isTail && !watchRewardEligible) {
             if !isTail {
-                if trackingSwipe, let swipeOrigin, swipeOrigin != id, admittedID != id {
+                if swipedToTarget, let swipeOrigin, swipeOrigin != id, admittedID != id {
                     completedHint = true
                 }
                 admittedID = id
@@ -872,114 +891,97 @@ struct AllowanceLimitPrompt: View {
     }
 }
 
-private enum PlayerGesture: Equatable {
-    case next(LessonClip), previous(LessonClip), tapForControls
+private enum PlayerGesture: Hashable {
+    case next, previous, close, controls
 
-    static let swipeHintKey = "foldot.player.completedSwipeHint.v7"
+    // The legacy hints could mark themselves complete while hidden by the player chrome.
+    static let pagingGuideKey = "pulseplayer.player.acknowledgedPagingGuide"
+    static let singleGuideKey = "pulseplayer.player.acknowledgedSingleVideoGuide"
 
-    static func forVideo(_ id: String, in entries: [PlaybackQueueEntry]) -> Self {
-        guard entries.count > 1, let index = entries.firstIndex(where: { $0.id == id }) else { return .tapForControls }
-        return index + 1 < entries.count ? .next(entries[index + 1].clip) : .previous(entries[index - 1].clip)
-    }
-
-    var neighbor: LessonClip? {
-        switch self {
-        case .next(let clip), .previous(let clip): clip
-        case .tapForControls: nil
+    static func forVideo(_ id: String, in entries: [PlaybackQueueEntry], canExit: Bool) -> Self {
+        guard entries.count > 1, let index = entries.firstIndex(where: { $0.id == id }) else {
+            return canExit ? .close : .controls
         }
+        return index + 1 < entries.count ? .next : .previous
     }
+
+    var pagesThroughVideos: Bool { self == .next || self == .previous }
 
     var instruction: String {
         switch self {
-        case .next: "Swipe up"
-        case .previous: "Swipe down"
-        case .tapForControls: "Tap the video to show or hide controls"
+        case .next: "Swipe up for the next video"
+        case .previous: "Swipe down for the previous video"
+        case .close: "Swipe left to close the player"
+        case .controls: "Tap the video to show or hide controls"
+        }
+    }
+
+    var arrowAngle: Angle {
+        switch self {
+        case .next: .degrees(90)
+        case .previous: .degrees(-90)
+        case .close, .controls: .degrees(0)
+        }
+    }
+
+    var motionOffset: CGSize {
+        switch self {
+        case .next: CGSize(width: 0, height: -5)
+        case .previous: CGSize(width: 0, height: 5)
+        case .close: CGSize(width: -5, height: 0)
+        case .controls: .zero
         }
     }
 }
 
 private struct PlayerGestureHint: View {
-    let eligible: Bool
     let gesture: PlayerGesture
-    @AppStorage(PlayerGesture.swipeHintKey) private var completedSwipe = false
-    @AppStorage("foldot.player.completedControlsHint.v1") private var completedControls = false
+    let dismiss: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var showing = false
-    @State private var moved = false
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @State private var nudged = false
 
     var body: some View {
-        let available = eligible && !completedSwipe && (gesture.neighbor != nil || !completedControls)
-        Group {
-            if available && showing {
-                HStack(spacing: 10) {
-                    if let neighbor = gesture.neighbor {
-                        ZStack(alignment: .bottomTrailing) {
-                            Group {
-                                if neighbor.playbackURL.isFileURL {
-                                    VideoFileThumbnail(url: neighbor.playbackURL, maximumSize: 120, fallbackCover: neighbor.coverURL)
-                                } else {
-                                    MediaCover(url: neighbor.coverURL, onMedia: true)
-                                }
-                            }
-                            .frame(width: 42, height: 52)
-                            .clipShape(.rect(cornerRadius: 8))
-                            Glyph(symbol: .back, size: 11, tint: PulsePlayerStyle.mediaBackdrop)
-                                .rotationEffect(.degrees(direction < 0 ? 90 : -90))
-                                .frame(width: 20, height: 20)
-                                .background(PulsePlayerStyle.mediaAccent, in: Circle())
-                        }
-                        .offset(y: moved && !reduceMotion ? direction * 5 : 0)
-                    } else {
-                        Glyph(symbol: .play, size: 18, tint: PulsePlayerStyle.mediaAccent)
-                            .frame(width: 36, height: 36)
-                            .scaleEffect(moved && !reduceMotion ? 0.85 : 1)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        LocalizedText(gesture.instruction)
-                            .font(.capture(.subheadline, weight: .semibold))
-                        if let neighbor = gesture.neighbor {
-                            Text(verbatim: neighbor.title).font(.capture(.caption)).lineLimit(2)
-                                .foregroundStyle(PulsePlayerStyle.mediaSecondary)
-                        }
-                    }
-                }
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(10)
-                .foregroundStyle(PulsePlayerStyle.onDark)
-                .pulsePlayerGlass(in: .rect(cornerRadius: 16), tint: PulsePlayerStyle.mediaBackdrop.opacity(0.78),
-                                  fallback: PulsePlayerStyle.mediaSurface, interactive: false, onDark: true)
-                .frame(maxWidth: 242, alignment: .leading)
-                .accessibilityElement(children: .combine)
-                .transition(.opacity)
+        HStack(spacing: 8) {
+            if !typeSize.isAccessibilitySize {
+                Glyph(symbol: gesture == .controls ? .play : .back, size: 16, tint: PulsePlayerStyle.mediaAccent)
+                    // The pan recognizer follows the physical direction in every language.
+                    .environment(\.layoutDirection, .leftToRight)
+                    .rotationEffect(gesture.arrowAngle)
+                    .offset(nudged && !reduceMotion ? gesture.motionOffset : .zero)
+                    .frame(width: 30, height: 32)
+                    .accessibilityHidden(true)
             }
+            LocalizedText(gesture.instruction)
+                .font(.capture(.subheadline, weight: .semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            Button(action: dismiss) {
+                LocalizedText("Done")
+                    .font(.capture(.footnote, weight: .semibold))
+                    .foregroundStyle(PulsePlayerStyle.mediaAccent)
+                    .padding(.horizontal, 4)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressStyle())
+            .accessibilityIdentifier("player.gestureGuide.dismiss")
         }
-        .allowsHitTesting(false)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: showing)
-        .task(id: available ? gesture : nil) {
-            showing = false
-            moved = false
-            guard available else { return }
-            do {
-                try await Task.sleep(for: .milliseconds(450))
-                try Task.checkCancellation()
-                showing = true
-                try await Task.sleep(for: .milliseconds(200))
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.7).repeatCount(4, autoreverses: true)) { moved = true }
-                try await Task.sleep(for: .seconds(5))
-                try Task.checkCancellation()
-                if gesture.neighbor != nil { completedSwipe = true } else { completedControls = true }
-            } catch { return }
+        .padding(.horizontal, 10).padding(.vertical, 2)
+        .foregroundStyle(PulsePlayerStyle.onDark)
+        .pulsePlayerGlass(in: .rect(cornerRadius: 16), tint: PulsePlayerStyle.mediaBackdrop.opacity(0.8),
+                          fallback: PulsePlayerStyle.mediaSurface, interactive: false, onDark: true)
+        .frame(maxWidth: 350)
+        .accessibilityElement(children: .contain)
+        .accessibilitySortPriority(1)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.6).repeatCount(4, autoreverses: true)) { nudged = true }
         }
-    }
-
-    private var direction: CGFloat {
-        if case .next = gesture { return -1 }
-        return 1
     }
 }
 
 private enum PlayerOptions: String, Identifiable {
-    case speed, more, folds
+    case speed, more, folds, folders
     var id: String { rawValue }
 }
 
@@ -998,6 +1000,8 @@ private struct ClipPage: View {
     @Environment(\.layoutDirection) private var layoutDirection
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @AppStorage(PlayerGesture.pagingGuideKey) private var acknowledgedPagingGuide = false
+    @AppStorage(PlayerGesture.singleGuideKey) private var acknowledgedSingleGuide = false
     @AppStorage(LocalPlaybackResume.enabledKey) private var resumesLocalPlayback = true
     @AppStorage(LocalPlaybackPreferences.speedKey) private var defaultLocalSpeed = 1.0
     @AppStorage(LocalPlaybackPreferences.loopKey) private var loopsLocalPlayback = false
@@ -1024,10 +1028,8 @@ private struct ClipPage: View {
     @State private var options: PlayerOptions?
     @State private var editorAfterOptions = false
     @State private var playlistEntryAfterOptions: String?
-    @State private var showsFolderOptions = false
     @State private var folderMoveError: String?
     @State private var editor = false
-    @State private var channelAfterTools: ChannelRoute?
     @State private var recorded = false
     @State private var allowed = false
     @State private var scrubbing = false
@@ -1113,6 +1115,16 @@ private struct ClipPage: View {
         visible && canControlPlayback && playback.intendsPlayback && playback.error == nil
             && !scrubbing && !draggingDock && favoriteError == nil && !voiceOverEnabled
     }
+    private var showsGestureGuide: Bool {
+        let acknowledged = gesture.pagesThroughVideos ? acknowledgedPagingGuide : acknowledgedSingleGuide
+        return !acknowledged && active && visible && allowed && phase == .active
+            && !ads.isPresenting && !pagingGate && !hasOpenPanel && playback.error == nil
+    }
+
+    private func acknowledgeGestureGuide() {
+        if gesture.pagesThroughVideos { acknowledgedPagingGuide = true } else { acknowledgedSingleGuide = true }
+    }
+
     private var controlsAreHidden: Bool { controlsHidden && canHideControls }
     private var canAutoHideControls: Bool { canHideControls && playback.isPlaying && !playback.isLoading }
 
@@ -1192,7 +1204,6 @@ private struct ClipPage: View {
                     editorAfterOptions = false
                     playlistEntryAfterOptions = nil
                     options = nil
-                    channelAfterTools = nil
                     editor = false
                     presentedSource = nil
                 }
@@ -1226,8 +1237,9 @@ private struct ClipPage: View {
             let controls = regions.dock.map { safeControls(in: $0, viewport: viewport) } ?? stage
             let topPadding = PlayerTopControls.topInset
             let dockHeight = min(dockContentHeight, max(0, controls.height - topPadding - 68))
-            let hintHeight = max(0, stage.height - 68 - (regions.dock == nil && !controlsAreHidden ? dockHeight + 8 : 0))
-            let hintArea = CGRect(x: stage.minX, y: stage.minY + 68, width: stage.width, height: hintHeight)
+            let hintInset: CGFloat = regions.dock == nil && stage.height >= 180 ? topPadding + PlayerTopControls.buttonSize + 8 : 0
+            let hintArea = CGRect(x: stage.minX, y: stage.minY + hintInset,
+                                  width: stage.width, height: max(0, stage.height - hintInset))
             ZStack(alignment: .topLeading) {
                 if active {
                     videoStage.inPlaybackFrame(media, direction: layoutDirection)
@@ -1242,13 +1254,11 @@ private struct ClipPage: View {
                             .inPlaybackFrame(controls, direction: layoutDirection, alignment: .topTrailing)
                     }
 
-                    if hintArea.height >= 76 {
-                        PlayerGestureHint(eligible: canHideControls, gesture: gesture)
-                            .padding(.horizontal, 14)
-                            .inPlaybackFrame(hintArea, direction: layoutDirection, alignment: .leading)
-                            .opacity(controlsAreHidden ? 0 : 1)
-                            .accessibilityHidden(controlsAreHidden)
-                            .allowsHitTesting(false)
+                    if showsGestureGuide {
+                        PlayerGestureHint(gesture: gesture, dismiss: acknowledgeGestureGuide)
+                            .id(gesture)
+                            .padding(.horizontal, 12)
+                            .inPlaybackFrame(hintArea, direction: layoutDirection, alignment: hintInset > 0 ? .top : .center)
                     }
                     if controlsAreHidden && playback.isLoading {
                         PlayerLoadingFeedback(buffering: true, floating: true)
@@ -1279,6 +1289,7 @@ private struct ClipPage: View {
     }
 
     private func tapVideo() {
+        if gesture == .controls && showsGestureGuide { acknowledgeGestureGuide() }
         if controlsAreHidden {
             setControlsHidden(false)
         } else if canAutoHideControls {
@@ -1291,7 +1302,13 @@ private struct ClipPage: View {
     private func swipeExit() {
         guard active, visible, phase == .active, !ads.isPresenting,
               !pagingGate, !hasOpenPanel, !scrubbing else { return }
-        exit?()
+        leavePlayer()
+    }
+
+    private func leavePlayer() {
+        guard let exit else { return }
+        if showsGestureGuide { acknowledgeGestureGuide() }
+        exit()
     }
 
     private func setControlsHidden(_ hidden: Bool) {
@@ -1360,10 +1377,11 @@ private struct ClipPage: View {
         VStack(alignment: .leading, spacing: 6) {
             playbackFeedback
             HStack(spacing: 10) {
-                if let exit { PlayerExitButton(overMedia: true, action: exit) }
+                if exit != nil { PlayerExitButton(overMedia: true, action: leavePlayer) }
                 PlaybackFoldNavigation(videoTitle: clip.title, identity: foldID,
                                        enabled: canControlPlayback && playback.error == nil, jump: jumpToFold)
             }
+            playbackFolderActions
             if playback.error == nil {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 12) {
@@ -1403,52 +1421,71 @@ private struct ClipPage: View {
         playback.seek(step.start)
     }
 
-    @ViewBuilder private var playbackSourceLink: some View {
-        if let channel = channelSource {
-            sourceButton(title: channel.title, coverURL: channel.coverURL, videoCount: channel.videoCount) {
-                channelAfterTools = channel
-                options = nil
+    @ViewBuilder private var playbackFolderActions: some View {
+        let channel = channelSource
+        let source = channel == nil ? librarySource : nil
+        if channel != nil || source != nil {
+            let layout = typeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+                : AnyLayout(HStackLayout(spacing: 10))
+            layout {
+                if let channel {
+                    sourceButton(title: channel.title, videoCount: channel.videoCount) {
+                        if channel.id == returningToChannel?.id, let exit {
+                            playback.pause()
+                            exit()
+                        } else {
+                            resumeAfterSheet = playback.intendsPlayback
+                            playback.pause()
+                            presentedSource = channel
+                        }
+                    }
+                } else if let source {
+                    sourceButton(title: source.title, videoCount: source.videoCount) {
+                        playback.pause()
+                        resumeAfterSheet = false
+                        library.openList(source.list)
+                    }
+                }
+                if localMovie?.isExport == false {
+                    if !typeSize.isAccessibilitySize { Spacer(minLength: 0) }
+                    Button { showOptions(.folders) } label: {
+                        LocalizedText("Move to folder").font(.capture(.footnote, weight: .semibold))
+                            .foregroundStyle(PulsePlayerStyle.mediaAccent)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(PressStyle())
+                    .accessibilityIdentifier("player.moveToFolder")
+                }
             }
-        } else if let source = librarySource {
-            sourceButton(title: source.title, coverURL: nil, videoCount: source.videoCount) {
-                resumeAfterSheet = false
-                options = nil
-                library.openList(source.list)
-            }
-        } else if let channel = clip.channel.nilIfBlank {
-            Text(verbatim: channel).font(.capture(.caption))
-                .foregroundStyle(PulsePlayerStyle.mediaSecondary).lineLimit(1).padding(.horizontal, 4)
+            .disabled(!active || hasOpenPanel || pagingGate || ads.isPresenting)
         }
     }
 
-    private func sourceButton(title: String, coverURL: URL?, videoCount: Int?, action: @escaping () -> Void) -> some View {
+    private func sourceButton(title: String, videoCount: Int?, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                MediaCover(url: coverURL, folder: true, onMedia: true)
-                    .frame(width: 38, height: 32)
-                    .clipShape(.rect(cornerRadius: 7))
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(verbatim: title).font(.capture(.footnote, weight: .semibold))
-                        .lineLimit(typeSize.isAccessibilitySize ? nil : 2)
-                    if let videoCount, videoCount >= 0 {
-                        LocalizedText("%@ videos", videoCount.formatted(.number.locale(locale)))
-                            .font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.mediaSecondary)
-                    }
+                Glyph(symbol: .folder, size: 16, tint: PulsePlayerStyle.mediaAccent)
+                Text(verbatim: title).font(.capture(.footnote, weight: .semibold))
+                    .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                if let videoCount, videoCount >= 0 {
+                    LocalizedText("%@ videos", videoCount.formatted(.number.locale(locale)))
+                        .font(.capture(.caption)).foregroundStyle(PulsePlayerStyle.mediaSecondary)
+                        .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
                 }
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
                 Glyph(symbol: .back, size: 11, tint: PulsePlayerStyle.mediaSecondary).rotationEffect(.degrees(180))
-                    .accessibilityHidden(true)
             }
-            .padding(.horizontal, 8).padding(.vertical, 5)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .pulsePlayerGlass(in: Capsule(), tint: Self.panelTint, fallback: PulsePlayerStyle.mediaSurface, onDark: true)
             .frame(minHeight: 44)
-            .background(PulsePlayerStyle.onDark.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
             .contentShape(Rectangle())
         }
         .buttonStyle(PressStyle())
+        .accessibilityLabel(Text(verbatim: title))
+        .accessibilityHint(LocalizedStringKey("Open folder"))
+        .accessibilityValue(Text(verbatim: videoCount.map { L10n.format("%@ videos", [$0.formatted(.number.locale(locale))], language: .from(locale)) } ?? ""))
         .accessibilityIdentifier("player.openSource")
-        .disabled(!active || pagingGate || ads.isPresenting)
     }
 
     private func resolveSource(_ lookup: SourceLookup) async {
@@ -1630,23 +1667,13 @@ private struct ClipPage: View {
     private func showOptions(_ selection: PlayerOptions) {
         resumeAfterSheet = playback.intendsPlayback
         playback.pause()
-        showsFolderOptions = false
         folderMoveError = nil
         options = selection
     }
 
     private func finishOptions() {
         favoriteError = nil
-        if let channel = channelAfterTools {
-            channelAfterTools = nil
-            guard active, visible, !pagingGate else { return }
-            if channel.id == returningToChannel?.id, let exit {
-                resumeAfterSheet = false
-                exit()
-            } else {
-                presentedSource = channel
-            }
-        } else if let entry = playlistEntryAfterOptions {
+        if let entry = playlistEntryAfterOptions {
             playlistEntryAfterOptions = nil
             if active && visible && !pagingGate && localPlaylist.contains(where: { $0.id == entry }) {
                 resumeAfterSheet = false
@@ -1669,6 +1696,7 @@ private struct ClipPage: View {
         case .speed: title = "Speed"
         case .more: title = "Video tools"
         case .folds: title = "Fold notes"
+        case .folders: title = "Move to folder"
         }
         return playerMenuSheet(title, showsPreview: selection == .more, close: { options = nil }) {
             if selection == .folds, let foldID {
@@ -1676,6 +1704,8 @@ private struct ClipPage: View {
                     resumeAfterSheet = play
                     options = nil
                 }
+            } else if selection == .folders {
+                if let movie = localMovie { folderOptions(for: movie) }
             } else if selection == .speed {
                 speedOptions(isLocal: isLocal)
             } else {
@@ -1790,6 +1820,10 @@ private struct ClipPage: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(verbatim: clip.title).font(.capture(.headline, weight: .semibold))
                     .lineLimit(3)
+                if channelSource == nil, librarySource == nil, let channel = clip.channel.nilIfBlank {
+                    Text(verbatim: channel).font(.capture(.caption))
+                        .foregroundStyle(PulsePlayerStyle.mediaSecondary).lineLimit(1)
+                }
                 if playback.timeline.duration > 0 {
                     Text(verbatim: durationLabel(playback.timeline.duration))
                         .font(.capture(.footnote)).monospacedDigit().foregroundStyle(PulsePlayerStyle.mediaSecondary)
@@ -1801,17 +1835,12 @@ private struct ClipPage: View {
     }
 
     @ViewBuilder private func moreOptions(isLocal: Bool) -> some View {
-        let saved = clip.localMovieID.map { library.isLocalSaved($0) } ?? library.isSaved(clip)
-        let movable = isLocal && localMovie?.isExport == false ? localMovie : nil
         let columns = [GridItem(.adaptive(minimum: typeSize.isAccessibilitySize ? 184 : 126), spacing: 8)]
         LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
-            PlaybackToolButton(saved ? "Remove from favorites" : "Save to favorites", symbol: .bookmark, selected: saved, action: save)
+            PlayerFavoriteButton(clip: clip, action: save)
             PlaybackToolButton(clip.localMovieID == nil ? "Edit a local video" : "Edit video", symbol: .edit) {
                 editorAfterOptions = true
                 options = nil
-            }
-            if movable != nil {
-                PlaybackToolButton("Move to folder", symbol: .folder, selected: showsFolderOptions) { showsFolderOptions.toggle() }
             }
             if clip.localMovieID != nil {
                 VideoExportEntry(clip: clip) { openExport in
@@ -1821,7 +1850,6 @@ private struct ClipPage: View {
         }
         .pulsePlayerKeepControlsTogether()
         if let favoriteError { ErrorNote(message: favoriteError, onMedia: true) }
-        if let movable, showsFolderOptions { folderOptions(for: movable) }
 
         Toggle(isOn: $fillsScreen) {
             LocalizedText("Fill screen").font(.capture(.subheadline, weight: .semibold))
@@ -1830,7 +1858,6 @@ private struct ClipPage: View {
         .tint(PulsePlayerStyle.mediaAccent)
         .accessibilityIdentifier("player.fillScreen")
 
-        playbackSourceLink
         if clip.localMovieID == nil { OfflineDownloadButton(clip: foldSource) }
         if isLocal && localPlaylist.count > 1 { playlistOptions }
     }
@@ -2122,6 +2149,19 @@ private struct PlayerExitButton: View {
             .contentShape(Rectangle())
         }.buttonStyle(PressStyle()).accessibilityLabel(LocalizedStringKey("Exit"))
             .accessibilityIdentifier("player.exit")
+    }
+}
+
+private struct PlayerFavoriteButton: View {
+    @EnvironmentObject private var library: LibraryStore
+    let clip: LessonClip
+    let action: () -> Void
+
+    var body: some View {
+        let saved = clip.localMovieID.map { library.isLocalSaved($0) } ?? library.isSaved(clip)
+        PlaybackToolButton(saved ? "Remove from favorites" : "Save to favorites",
+                           symbol: saved ? .bookmarkFilled : .bookmark, selected: saved, action: action)
+            .accessibilityIdentifier("player.favorite")
     }
 }
 

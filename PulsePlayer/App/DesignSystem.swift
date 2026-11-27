@@ -99,14 +99,14 @@ struct ScenePage<PageContent: View>: View {
 // MARK: - Glyphs
 
 enum PulsePlayerGlyph: String, CaseIterable {
-    case feed, edit, library, link, search, bookmark, download
+    case feed, edit, library, link, search, bookmark, bookmarkFilled, download
     case play, pause, close, back, sound, mute, folder, settings, fold, pass
     var assetName: String { "Glyph" + rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
     // Shown only while the original glyph artwork is missing, so every control stays usable.
     var fallbackTitle: String {
         switch self {
         case .fold: "Practice"; case .pass: "Plus"; case .feed: "Watch"; case .edit: "Edit"; case .library: "Library"
-        case .link: "Link"; case .search: "Search"; case .bookmark: "Saved"; case .download: "Download"
+        case .link: "Link"; case .search: "Search"; case .bookmark, .bookmarkFilled: "Saved"; case .download: "Download"
         case .play: "Play"; case .pause: "Pause"; case .close: "Close"; case .back: "Back"
         case .sound: "Sound"; case .mute: "Mute"; case .folder: "Folder"; case .settings: "Me"
         }
