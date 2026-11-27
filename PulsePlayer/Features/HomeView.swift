@@ -166,7 +166,7 @@ struct LessonSearchPage: View {
         VStack(spacing: compact ? 8 : 14) {
             Image(decorative: "PulsePlayerLaunchMark").resizable().scaledToFit()
                 .frame(width: compact ? 32 : 66, height: compact ? 32 : 66)
-            LocalizedText("No recent links")
+            LocalizedText("Empty")
                 .font(.capture(.title3, weight: .semibold))
                 .multilineTextAlignment(.center)
                 .accessibilityAddTraits(.isHeader)
