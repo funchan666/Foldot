@@ -12,7 +12,7 @@ struct PulsePlayerConfiguration {
     let privacyURL: URL?
     let termsURL: URL?
     let websiteURL: URL?
-    // getV2 `name`: the canonical app name, independent of locale.
+    // Case-sensitive release name registered with getV2.
     let releaseName: String
     // Build-configured Google demo ads (test builds only). Production reads getV2.adList.
     let adsTestMode: Bool

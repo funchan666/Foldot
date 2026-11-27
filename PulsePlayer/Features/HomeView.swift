@@ -217,9 +217,9 @@ struct LessonSearchPage: View {
             if let linkError { ErrorNote(message: linkError) }
             layout {
                 HStack(spacing: 8) {
-                    Glyph(symbol: .search, size: 18, tint: PulsePlayerStyle.accent)
+                    Glyph(symbol: .link, size: 18, tint: PulsePlayerStyle.accent)
                     TextField("Video link or short code", text: $link,
-                              prompt: Text("Enter a link or code").foregroundStyle(PulsePlayerStyle.secondary))
+                              prompt: Text("Search").foregroundStyle(PulsePlayerStyle.secondary))
                         .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .focused($linkFocused).submitLabel(.go).onSubmit { openLink(link) }
                         .font(.capture(.body))

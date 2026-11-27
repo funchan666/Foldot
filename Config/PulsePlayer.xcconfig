@@ -1,7 +1,6 @@
-// Temporary installation identity for StoreKit testing with the toolkit products.
-PRODUCT_BUNDLE_IDENTIFIER = im.seex.lobo
-// getV2 `name`; keep the original capitalisation.
-PULSEPLAYER_RELEASE_NAME = PulsePlayer
+// The installation Bundle Identifier is set in the PulsePlayer target's Signing & Capabilities.
+// Case-sensitive release name registered with getV2.
+PULSEPLAYER_RELEASE_NAME = LoopFold
 PULSEPLAYER_API_HOST = ghpeoz.pulseplayer.site
 // Production packageName and guest-login source are independent of the installed test BID.
 PULSEPLAYER_SERVICE_PACKAGE_NAME = app.foldotplayer.loopfold
