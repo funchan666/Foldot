@@ -14,10 +14,10 @@ PulsePlayer 是一款原生 SwiftUI 趣味折纸 App。打开 `PulsePlayer.xcode
 
 已导入或下载的视频可离线练习。资料库提供本地文件夹、收藏和剪辑工具。裁剪、变速、旋转、镜像、提取音频、关键帧对比及导出分享均免费。Plus 提供不限每日次数的在线视频观看和下载，以及免开屏广告。
 
-## 测试配置
+## 当前环境
 
-Debug 和 Release 均使用 `Config/PulsePlayer.xcconfig`。业务 API 主机为 `devapi.io-jp.com`，安装标识、游客来源和业务包名均为 `im.seex.lobo`，版本为 `1.0.0`，`getV2.name` 为 `PulsePlayer`。此测试 Bundle ID 与工具包的其他测试包共用，同机安装会替换已有的同标识 App。
+Debug 和 Release 均使用 `Config/PulsePlayer.xcconfig`，连接生产 API `https://ghpeoz.pulseplayer.site`。游客登录的 `source` 和业务请求的 `packageName` 使用 `app.foldotplayer.loopfold`。`getV2.name` 为 `PulsePlayer`，版本为 `1.0.0`。
 
-开屏及激励广告使用 Google 官方演示配置。测试商品为 `coins_1.99` 和 `conis_4.99`，配置位于 `PulsePlayer/Resources/Commerce.json`。实际付款页显示 Apple 返回的商品价格和周期。官网与协议保留测试占位。用户确认测试通过后再收集并切换正式配置。
+安装包暂用工具包测试 Bundle ID `im.seex.lobo`。测试商品 ID 为 `coins_1.99` 和 `conis_4.99`，配置位于 `PulsePlayer/Resources/Commerce.json`。
 
-手动联调时在 **Search** 页输入工具包测试短码 `2DhdI8`。可以用返回的真实课程或自己导入的视频核对标记、循环和续播。
+官网和协议入口使用 `www.pulseplayer.site`。Google 广告使用正式 App ID，开屏与激励广告位由生产接口 `getV2.adList` 下发。

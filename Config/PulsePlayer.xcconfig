@@ -1,14 +1,14 @@
-// PulsePlayer uses the toolkit development environment for Debug and Release.
+// Temporary installation identity for StoreKit testing with the toolkit products.
 PRODUCT_BUNDLE_IDENTIFIER = im.seex.lobo
 // getV2 `name`; keep the original capitalisation.
 PULSEPLAYER_RELEASE_NAME = PulsePlayer
-PULSEPLAYER_API_HOST = devapi.io-jp.com
-// Business packageName and guest-login source.
-PULSEPLAYER_SERVICE_PACKAGE_NAME = $(PRODUCT_BUNDLE_IDENTIFIER)
-// Empty expansion preserves // in xcconfig URL values. Placeholders until production.
-PULSEPLAYER_WEBSITE_URL = https:/$()/example.com/
-PULSEPLAYER_PRIVACY_URL = https:/$()/example.com/
-PULSEPLAYER_TERMS_URL = https:/$()/example.com/
+PULSEPLAYER_API_HOST = ghpeoz.pulseplayer.site
+// Production packageName and guest-login source are independent of the installed test BID.
+PULSEPLAYER_SERVICE_PACKAGE_NAME = app.foldotplayer.loopfold
+// Empty expansion preserves // in xcconfig URL values.
+PULSEPLAYER_WEBSITE_URL = https:/$()/www.pulseplayer.site/
+PULSEPLAYER_PRIVACY_URL = https:/$()/www.pulseplayer.site/privacy.html
+PULSEPLAYER_TERMS_URL = https:/$()/www.pulseplayer.site/terms.html
 IPHONEOS_DEPLOYMENT_TARGET = 17.0
 SWIFT_VERSION = 5.0
 TARGETED_DEVICE_FAMILY = 1
@@ -16,7 +16,7 @@ MARKETING_VERSION = 1.0.0
 CURRENT_PROJECT_VERSION = 2
 CODE_SIGN_STYLE = Automatic
 DEVELOPMENT_TEAM =
-// Google official iOS demo configuration (test builds only). Set NO and replace before publishing.
-PULSEPLAYER_ADS_TEST_MODE = YES
-PULSEPLAYER_GOOGLE_ADS_APP_ID = ca-app-pub-3940256099942544~1458002511
+// Production ad units are supplied by getV2.adList.
+PULSEPLAYER_ADS_TEST_MODE = NO
+PULSEPLAYER_GOOGLE_ADS_APP_ID = ca-app-pub-4423220037289714~1028238991
 OTHER_LDFLAGS = $(inherited) -ObjC
