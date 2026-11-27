@@ -2,7 +2,7 @@
 // Case-sensitive release name registered with getV2.
 PULSEPLAYER_RELEASE_NAME = LoopFold
 PULSEPLAYER_API_HOST = ghpeoz.pulseplayer.site
-// Production packageName and guest-login source are independent of the installed test BID.
+// Registered backend identity for packageName and guest login.
 PULSEPLAYER_SERVICE_PACKAGE_NAME = app.foldotplayer.loopfold
 // Empty expansion preserves // in xcconfig URL values.
 PULSEPLAYER_WEBSITE_URL = https:/$()/www.pulseplayer.site/
