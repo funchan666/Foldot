@@ -1,0 +1,80 @@
+workflows:
+  pulseplayer-ios-app-store:
+    name: PulsePlayer iOS App Store
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+
+    integrations:
+      app_store_connect: PulsePlayer
+
+    environment:
+      xcode: "27.1"
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: app.foldotplayer.loopfold
+      vars:
+        BUNDLE_ID: "app.foldotplayer.loopfold"
+        XCODE_PROJECT: "PulsePlayer.xcodeproj"
+        XCODE_SCHEME: "PulsePlayer"
+        APP_STORE_APPLE_ID: "6839933343"
+        PROJECT_BUILD_NUMBER: "2"
+
+    scripts:
+      - name: Set up App Store signing
+        script: |
+          set -eu
+          cd "$CM_BUILD_DIR"
+          test -f "$XCODE_PROJECT/xcshareddata/xcschemes/$XCODE_SCHEME.xcscheme"
+          xcode-project use-profiles --project "$XCODE_PROJECT" \
+            --custom-export-options='{"manageAppVersionAndBuildNumber": false}'
+
+      - name: Build and verify the signed IPA
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          latest=$(app-store-connect get-latest-build-number "$APP_STORE_APPLE_ID" --platform IOS --all-versions)
+          latest=${latest:-0}
+          if ! [[ $latest =~ ^[0-9]+$ ]]; then
+            echo "Expected a numeric App Store Connect build number, got '$latest'." >&2
+            exit 1
+          fi
+          next=$((10#$latest + 1))
+          if (( PROJECT_BUILD_NUMBER > next )); then
+            next=$PROJECT_BUILD_NUMBER
+          fi
+
+          xcode-project build-ipa \
+            --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME" --config Release \
+            --archive-xcargs "CURRENT_PROJECT_VERSION=$next"
+
+          ipa_files=(build/ios/ipa/*.ipa)
+          if [[ ${#ipa_files[@]} -ne 1 || ! -f "${ipa_files[0]}" ]]; then
+            echo "Expected one signed IPA in build/ios/ipa." >&2
+            exit 1
+          fi
+          plist=$(mktemp)
+          trap 'rm -f "$plist"' EXIT
+          unzip -p "${ipa_files[0]}" "Payload/$XCODE_SCHEME.app/Info.plist" > "$plist"
+          bundle_id=$(plutil -extract CFBundleIdentifier raw -o - "$plist")
+          build_number=$(plutil -extract CFBundleVersion raw -o - "$plist")
+          echo "Exported $bundle_id, build $build_number (expected $BUNDLE_ID, build $next)."
+          [[ $bundle_id == "$BUNDLE_ID" && $build_number == "$next" ]]
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+
+    publishing:
+      email:
+        recipients:
+          - funchan@126.com
+        notify:
+          success: true
+          failure: true
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: false
+        submit_to_app_store: false
