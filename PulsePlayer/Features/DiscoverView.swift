@@ -659,6 +659,7 @@ struct AllowanceLimitPrompt: View {
     @EnvironmentObject private var commerce: CommerceStore
     @EnvironmentObject private var quota: QuotaStore
     @EnvironmentObject private var ads: RewardedAds
+    @EnvironmentObject private var accountAccess: AccountAccessFlow
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
     @AccessibilityFocusState private var titleFocused: Bool
@@ -833,7 +834,7 @@ struct AllowanceLimitPrompt: View {
         adAttempt = attempt
         adUnavailable = false
         adTask = Task {
-            await ads.watch(commerce: commerce, quota: quota, kind: kind)
+            await ads.watch(commerce: commerce, quota: quota, kind: kind, accountAccess: accountAccess)
             guard !Task.isCancelled else { return }
             adTask = nil
             adUnavailable = !ads.isPresenting && rewardNotice == nil && ads.completedReward == attempt.previousCompletion

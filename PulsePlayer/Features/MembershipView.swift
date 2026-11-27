@@ -79,13 +79,11 @@ struct MembershipView: View {
 
     private var configuredPlans: [CommerceConfiguration.Product] { commerce.policy?.products ?? [] }
 
-    private var plans: [SKProduct] {
-        configuredPlans.compactMap { entry in
-            commerce.products.first { $0.productIdentifier == entry.id }
-        }.filter { !commerce.period($0, locale: locale).isEmpty }
-    }
-    private var selectedPlan: SKProduct? {
-        plans.first(where: { $0.productIdentifier == selectedID }) ?? plans.first
+    private var selectedPlanID: String? { selectedID ?? configuredPlans.first?.id }
+    private var selectedPlan: SKProduct? { storeProduct(for: selectedPlanID) }
+
+    private func storeProduct(for id: String?) -> SKProduct? {
+        commerce.products.first { $0.productIdentifier == id && !commerce.period($0, locale: locale).isEmpty }
     }
     private var purchasing: Bool { commerce.preparingPurchase || commerce.busy || purchaseTask != nil }
     private var loadingCatalog: Bool { planTask != nil || commerce.loadingPlans }
@@ -279,25 +277,17 @@ struct MembershipView: View {
             if configuredPlans.isEmpty {
                 EmptyStateScene(appearance: .inline(.pass), message: "Subscription setup is incomplete. Please contact support.")
             } else {
-                if !plans.isEmpty {
-                    LocalizedText("Choose a plan")
-                        .font(.capture(.headline)).accessibilityAddTraits(.isHeader)
-                    let columnCount = sideBySide ? min(plans.count, 2) : 1
-                    let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: columnCount)
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
-                        ForEach(plans, id: \.productIdentifier) { product in planOption(product) }
+                LocalizedText("Choose a plan")
+                    .font(.capture(.headline)).accessibilityAddTraits(.isHeader)
+                let columnCount = sideBySide ? min(configuredPlans.count, 2) : 1
+                let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: columnCount)
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+                    ForEach(configuredPlans) { entry in
+                        planOption(entry, product: storeProduct(for: entry.id))
                     }
                 }
-                if !loadingCatalog, plans.count < configuredPlans.count {
-                    EmptyStateScene(appearance: .inline(.pass),
-                                    message: commerce.plansError ?? "This plan isn’t available from Apple yet. Please try again later.")
-                    if selectedPlan != nil {
-                        Button(action: reloadPlans) {
-                            LocalizedText("Reload plans")
-                        }
-                        .buttonStyle(CompactActionStyle())
-                        .disabled(interactionLocked)
-                    }
+                if !loadingCatalog, selectedPlan == nil, let error = commerce.plansError {
+                    ErrorNote(message: error)
                 }
             }
             if api.session == nil { ConnectionPanel() }
@@ -311,16 +301,29 @@ struct MembershipView: View {
         return selectedPlan == nil ? "Check price" : "Subscribe to PulsePlayer Plus"
     }
 
-    private func planOption(_ product: SKProduct) -> some View {
-        let selected = selectedPlan?.productIdentifier == product.productIdentifier
+    private func planOption(_ entry: CommerceConfiguration.Product, product: SKProduct?) -> some View {
+        let selected = selectedPlanID == entry.id
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        return Button { selectedID = product.productIdentifier } label: {
+        return Button { selectedID = entry.id } label: {
             VStack(alignment: .leading, spacing: 10) {
-                planName(product)
-                    .font(.capture(.subheadline, weight: .medium))
-                Text(verbatim: commerce.price(product))
-                    .font(.capture(.title, weight: .semibold))
-                    .monospacedDigit()
+                Group {
+                    if let product { planName(product) }
+                    else { LocalizedText(entry.label) }
+                }
+                .font(.capture(.subheadline, weight: .medium))
+                if let product {
+                    Text(verbatim: commerce.price(product))
+                        .font(.capture(.title, weight: .semibold)).monospacedDigit()
+                } else if let amount = Decimal(string: entry.displayPriceUSD, locale: Locale(identifier: "en_US_POSIX")) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(verbatim: amount.formatted(.currency(code: "USD").locale(locale)))
+                            .font(.capture(.title, weight: .semibold)).monospacedDigit()
+                        LocalizedText("US reference price").font(.capture(.caption))
+                            .foregroundStyle(PulsePlayerStyle.secondary)
+                    }
+                } else {
+                    LocalizedText("Check price").font(.capture(.subheadline))
+                }
             }
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
@@ -335,10 +338,10 @@ struct MembershipView: View {
             .contentShape(.interaction, shape)
         }
         .buttonStyle(PressStyle())
-        .disabled(interactionLocked)
+        .disabled(purchasing || ads.busy || ads.isPresenting)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .accessibilityIdentifier("membership.plan.\(product.productIdentifier)")
+        .accessibilityIdentifier("membership.plan.\(entry.id)")
     }
 
     private func billingCopy(for product: SKProduct) -> (name: String, renewal: String)? {
@@ -392,9 +395,9 @@ struct MembershipView: View {
     }
 
     private func reloadPlans() {
-        guard !interactionLocked else { return }
+        guard !interactionLocked, let selectedPlanID else { return }
         planTask = Task {
-            await commerce.loadPlans()
+            await commerce.loadPlans(for: selectedPlanID)
             planTask = nil
         }
     }

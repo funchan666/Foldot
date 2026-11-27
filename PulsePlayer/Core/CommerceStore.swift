@@ -145,16 +145,17 @@ final class CommerceStore: NSObject, ObservableObject {
         retryPending()
     }
     // Fetch metadata when the paywall opens; this never creates an order or payment.
-    func loadPlans() async {
+    func loadPlans(for planID: String? = nil) async {
         guard !loadingPlans, !preparingPurchase, !busy else { return }
         loadingPlans = true
         plansError = nil
-        products = []
         defer { loadingPlans = false }
-        guard let entries = policy?.products, !entries.isEmpty else {
+        let entries = policy?.products.filter { planID == nil || $0.id == planID } ?? []
+        guard !entries.isEmpty else {
             plansError = "Subscription setup is incomplete. Please contact support."
             return
         }
+        products.removeAll { planID == nil || $0.productIdentifier == planID }
         for entry in entries {
             do {
                 let product = try await requestProduct(entry.id)

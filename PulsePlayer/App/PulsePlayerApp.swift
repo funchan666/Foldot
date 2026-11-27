@@ -94,6 +94,11 @@ struct PulsePlayerStartupHost: View {
                 ads.didBecomeActive(commerce: commerce, accountAccess: accountAccess)
             }
         }
+        .onChange(of: commerce.busy || commerce.preparingPurchase || accountAccess.isBusy) { _, occupied in
+            if !occupied, scenePhase == .active {
+                ads.resumePendingConsentForm(commerce: commerce, accountAccess: accountAccess)
+            }
+        }
     }
 }
 
